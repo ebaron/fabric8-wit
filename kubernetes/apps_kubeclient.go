@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -53,6 +54,7 @@ type KubeClientInterface interface {
 		startTime time.Time) (*app.SimpleDeploymentStats, error)
 	GetDeploymentStatSeries(spaceName string, appName string, envName string, startTime time.Time,
 		endTime time.Time, limit int) (*app.SimpleDeploymentStatSeries, error)
+	DeleteDeployment(spaceName string, appName string, envName string) error
 	GetEnvironments() ([]*app.SimpleEnvironment, error)
 	GetEnvironment(envName string) (*app.SimpleEnvironment, error)
 	GetPodsInNamespace(nameSpace string, appName string) ([]v1.Pod, error)
@@ -221,7 +223,7 @@ func (kc *kubeClient) ScaleDeployment(spaceName string, appName string, envName 
 		return nil, err
 	}
 
-	_, err = kc.putResource(dcScaleURL, yamlScale)
+	_, err = kc.sendResource(dcScaleURL, "PUT", yamlScale, "application/yaml")
 	if err != nil {
 		return nil, err
 	}
@@ -348,6 +350,22 @@ func (kc *kubeClient) GetDeploymentStatSeries(spaceName string, appName string, 
 	}
 
 	return result, nil
+}
+
+func (kc *kubeClient) DeleteDeployment(spaceName string, appName string, envName string) error {
+	envNS, err := kc.getEnvironmentNamespace(envName)
+	if err != nil {
+		return err
+	}
+	// Delete DC (will also delete RCs and pods)
+	err = kc.deleteDeploymentConfig(spaceName, appName, envNS)
+	if err != nil {
+		return err
+	}
+	// Delete routes
+	//err = kc.deleteRoutes(appName, envNS)
+	// Delete services
+	return nil
 }
 
 // GetEnvironments retrieves information on all environments in the cluster
@@ -508,14 +526,14 @@ func (kc *kubeClient) getEnvironmentNamespace(envName string) (string, error) {
 }
 
 // Derived from: https://github.com/fabric8-services/fabric8-tenant/blob/master/openshift/kube_token.go
-func (kc *kubeClient) putResource(url string, putBody []byte) (*string, error) {
+func (kc *kubeClient) sendResource(url string, method string, reqBody []byte, contentType string) ([]byte, error) {
 	fullURL := strings.TrimSuffix(kc.config.ClusterURL, "/") + url
-	req, err := http.NewRequest("PUT", fullURL, bytes.NewBuffer(putBody))
+	req, err := http.NewRequest(method, fullURL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/yaml")
-	req.Header.Set("Accept", "application/yaml")
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Accept", contentType)
 	req.Header.Set("Authorization", "Bearer "+kc.config.BearerToken)
 
 	client := http.DefaultClient
@@ -525,17 +543,16 @@ func (kc *kubeClient) putResource(url string, putBody []byte) (*string, error) {
 	}
 
 	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
+	respBody, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
 	status := resp.StatusCode
 	if status < 200 || status > 300 {
-		return nil, fmt.Errorf("Failed to PUT url %s: status code %d", fullURL, status)
+		return nil, fmt.Errorf("Failed to %s url %s: status code %d", method, fullURL, status)
 	}
-	bodyStr := string(body)
-	return &bodyStr, nil
+	return respBody, nil
 }
 
 func (kc *kubeClient) getDeploymentConfig(namespace string, appName string, space string) (*deployment, error) {
@@ -585,6 +602,32 @@ func (kc *kubeClient) getDeploymentConfig(namespace string, appName string, spac
 		appVersion: version,
 	}
 	return dc, nil
+}
+
+func (kc *kubeClient) deleteDeploymentConfig(spaceName string, appName string, namespace string) error {
+	// Check that the deployment config belongs to the expected space
+	_, err := kc.getDeploymentConfig(namespace, appName, spaceName)
+	if err != nil {
+		return err
+	}
+
+	dcURL := fmt.Sprintf("/oapi/v1/namespaces/%s/deploymentconfigs/%s", namespace, appName)
+	// Delete all dependent objects and then this DC
+	policy := metaV1.DeletePropagationForeground
+	opts := metaV1.DeleteOptions{
+		PropagationPolicy: &policy,
+	}
+	reqBody, err := json.Marshal(opts)
+	if err != nil {
+		return err
+	}
+	// API states this should return a Status object, but it returns the DC instead,
+	// just check for no HTTP error
+	_, err = kc.sendResource(dcURL, "DELETE", reqBody, "application/json")
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (kc *kubeClient) getCurrentDeployment(space string, appName string, namespace string) (*deployment, error) {
