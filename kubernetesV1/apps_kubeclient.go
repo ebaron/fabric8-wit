@@ -2,16 +2,15 @@ package kubernetesV1
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"math"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
-	yaml "gopkg.in/yaml.v2"
 	resource "k8s.io/apimachinery/pkg/api/resource"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
@@ -36,8 +35,8 @@ type KubeClientConfig struct {
 	KubeRESTAPIGetter
 	// Provides access to the metrics API, uses default implementation if not set
 	MetricsGetter
-	// hook to inject build configs for testing
-	BuildConfigInterface
+	// Provides access to the OpenShift REST API, uses default implementation if not set
+	OpenShiftRESTAPIGetter
 }
 
 // KubeRESTAPIGetter has a method to access the KubeRESTAPI interface
@@ -45,14 +44,14 @@ type KubeRESTAPIGetter interface {
 	GetKubeRESTAPI(config *KubeClientConfig) (KubeRESTAPI, error)
 }
 
+// OpenShiftRESTAPIGetter has a method to access the OpenShiftRESTAPI interface
+type OpenShiftRESTAPIGetter interface {
+	GetOpenShiftRESTAPI(config *KubeClientConfig) (OpenShiftRESTAPI, error)
+}
+
 // MetricsGetter has a method to access the MetricsInterface interface
 type MetricsGetter interface {
 	GetMetrics(config *MetricsClientConfig) (MetricsInterface, error)
-}
-
-// BuildConfigGetter will provide build configs for testing
-type BuildConfigInterface interface {
-	GetBuildConfigs(space string) ([]string, error)
 }
 
 // KubeClientInterface contains configuration and methods for interacting with a Kubernetes cluster
@@ -76,12 +75,24 @@ type kubeClient struct {
 	envMap map[string]string
 	KubeRESTAPI
 	MetricsInterface
-	BuildConfigInterface
+	OpenShiftRESTAPI
 }
 
 // KubeRESTAPI collects methods that call out to the Kubernetes API server over the network
 type KubeRESTAPI interface {
 	corev1.CoreV1Interface
+}
+
+// OpenShiftRESTAPI collects methods that call out to the OpenShift API server over the network
+type OpenShiftRESTAPI interface {
+	GetBuildConfigs(namespace string, labelSelector string) (map[string]interface{}, error)
+	GetDeploymentConfig(namespace string, name string) (map[string]interface{}, error)
+	GetDeploymentConfigScale(namespace string, name string) (map[string]interface{}, error)
+	SetDeploymentConfigScale(namespace string, name string, scale map[string]interface{}) error
+}
+
+type openShiftAPIClient struct {
+	config *KubeClientConfig
 }
 
 type deployment struct {
@@ -99,7 +110,15 @@ func NewKubeClient(config *KubeClientConfig) (KubeClientInterface, error) {
 	if config.KubeRESTAPIGetter == nil {
 		config.KubeRESTAPIGetter = &defaultGetter{}
 	}
+	// Use default implementation if no OpenShiftGetter is specified
+	if config.OpenShiftRESTAPIGetter == nil {
+		config.OpenShiftRESTAPIGetter = &defaultGetter{}
+	}
 	kubeAPI, err := config.GetKubeRESTAPI(config)
+	if err != nil {
+		return nil, err
+	}
+	osAPI, err := config.GetOpenShiftRESTAPI(config)
 	if err != nil {
 		return nil, err
 	}
@@ -125,10 +144,10 @@ func NewKubeClient(config *KubeClientConfig) (KubeClientInterface, error) {
 	}
 
 	kubeClient := &kubeClient{
-		config:               config,
-		KubeRESTAPI:          kubeAPI,
-		MetricsInterface:     metrics,
-		BuildConfigInterface: config.BuildConfigInterface,
+		config:           config,
+		KubeRESTAPI:      kubeAPI,
+		MetricsInterface: metrics,
+		OpenShiftRESTAPI: osAPI,
 	}
 
 	// Get environments from config map
@@ -152,6 +171,13 @@ func (*defaultGetter) GetKubeRESTAPI(config *KubeClientConfig) (KubeRESTAPI, err
 	return clientset.CoreV1(), nil
 }
 
+func (*defaultGetter) GetOpenShiftRESTAPI(config *KubeClientConfig) (OpenShiftRESTAPI, error) {
+	client := &openShiftAPIClient{
+		config: config,
+	}
+	return client, nil
+}
+
 func (*defaultGetter) GetMetrics(config *MetricsClientConfig) (MetricsInterface, error) {
 	return NewMetricsClient(config)
 }
@@ -167,7 +193,7 @@ func (kc *kubeClient) GetSpace(spaceName string) (*app.SimpleSpaceV1, error) {
 	// Get BuildConfigs within the user namespace that have a matching 'space' label
 	// This is similar to how pipelines are displayed in fabric8-ui
 	// https://github.com/fabric8-ui/fabric8-ui/blob/master/src/app/space/create/pipelines/pipelines.component.ts
-	buildconfigs, err := kc.getBuildConfigs(spaceName)
+	buildconfigs, err := kc.getBuildConfigsForSpace(spaceName)
 	if err != nil {
 		return nil, err
 	}
@@ -218,40 +244,42 @@ func (kc *kubeClient) ScaleDeployment(spaceName string, appName string, envName 
 		return nil, err
 	}
 	// Look up the Scale for the DeploymentConfig corresponding to the application name in the provided environment
-	dcScaleURL := fmt.Sprintf("/oapi/v1/namespaces/%s/deploymentconfigs/%s/scale", envNS, appName)
-	scale, err := kc.getResource(dcScaleURL, true)
+	scale, err := kc.GetDeploymentConfigScale(envNS, appName)
 	if err != nil {
 		return nil, err
-	} else if scale == nil {
-		return nil, nil
 	}
 
-	spec, ok := scale["spec"].(map[interface{}]interface{})
+	spec, ok := scale["spec"].(map[string]interface{})
 	if !ok {
 		return nil, errors.New("Invalid deployment config returned from endpoint: missing 'spec'")
 	}
 
-	replicasYaml, pres := spec["replicas"]
+	replicas, pres := spec["replicas"]
 	oldReplicas := 0 // replicas property may be missing from spec if set to 0
 	if pres {
-		oldReplicas, ok = replicasYaml.(int)
+		oldReplicas, ok = replicas.(int)
 		if !ok {
 			return nil, errors.New("Invalid deployment config returned from endpoint: 'replicas' is not an integer")
 		}
 	}
 	spec["replicas"] = deployNumber
 
-	yamlScale, err := yaml.Marshal(scale)
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = kc.putResource(dcScaleURL, yamlScale)
+	err = kc.SetDeploymentConfigScale(envNS, appName, scale)
 	if err != nil {
 		return nil, err
 	}
 
 	return &oldReplicas, nil
+}
+
+func (oc *openShiftAPIClient) GetDeploymentConfigScale(namespace string, name string) (map[string]interface{}, error) {
+	dcScaleURL := fmt.Sprintf("/oapi/v1/namespaces/%s/deploymentconfigs/%s/scale", namespace, name)
+	return oc.getResource(dcScaleURL, false)
+}
+
+func (oc *openShiftAPIClient) SetDeploymentConfigScale(namespace string, name string, scale map[string]interface{}) error {
+	dcScaleURL := fmt.Sprintf("/oapi/v1/namespaces/%s/deploymentconfigs/%s/scale", namespace, name)
+	return oc.putResource(dcScaleURL, scale)
 }
 
 // GetDeployment returns information about the current deployment of an application within a
@@ -466,20 +494,13 @@ func getTimestampEndpoints(metricsSeries ...[]*app.TimedNumberTupleV1) (minTime,
 	return minTime, maxTime
 }
 
-func (kc *kubeClient) getBuildConfigs(space string) ([]string, error) {
-
-	// hook for testing
-	if kc.config.BuildConfigInterface != nil {
-		return kc.config.BuildConfigInterface.GetBuildConfigs(space)
-	}
-
+func (kc *kubeClient) getBuildConfigsForSpace(space string) ([]string, error) {
 	// BuildConfigs are OpenShift objects, so access REST API using HTTP directly until
 	// there is a Go client for OpenShift
 
 	// BuildConfigs created by fabric8 have a "space" label indicating the space they belong to
-	queryParam := url.QueryEscape("space=" + space)
-	bcURL := fmt.Sprintf("/oapi/v1/namespaces/%s/buildconfigs?labelSelector=%s", kc.config.UserNamespace, queryParam)
-	result, err := kc.getResource(bcURL, false)
+	escapedSelector := url.QueryEscape("space=" + space)
+	result, err := kc.GetBuildConfigs(kc.config.UserNamespace, escapedSelector)
 	if err != nil {
 		return nil, err
 	}
@@ -496,11 +517,11 @@ func (kc *kubeClient) getBuildConfigs(space string) ([]string, error) {
 	// Extract the names of the BuildConfigs from the response
 	buildconfigs := make([]string, 0)
 	for _, item := range items {
-		bc, ok := item.(map[interface{}]interface{})
+		bc, ok := item.(map[string]interface{})
 		if !ok {
 			return nil, errors.New("Malformed build config")
 		}
-		metadata, ok := bc["metadata"].(map[interface{}]interface{})
+		metadata, ok := bc["metadata"].(map[string]interface{})
 		if !ok {
 			return nil, errors.New("Metadata missing from build config")
 		}
@@ -511,6 +532,11 @@ func (kc *kubeClient) getBuildConfigs(space string) ([]string, error) {
 		buildconfigs = append(buildconfigs, name)
 	}
 	return buildconfigs, nil
+}
+
+func (oc *openShiftAPIClient) GetBuildConfigs(namespace string, labelSelector string) (map[string]interface{}, error) {
+	bcURL := fmt.Sprintf("/oapi/v1/namespaces/%s/buildconfigs?labelSelector=%s", namespace, labelSelector)
+	return oc.getResource(bcURL, false)
 }
 
 func (kc *kubeClient) getEnvironmentsFromConfigMap() (map[string]string, error) {
@@ -559,39 +585,36 @@ func (kc *kubeClient) getEnvironmentNamespace(envName string) (string, error) {
 }
 
 // Derived from: https://github.com/fabric8-services/fabric8-tenant/blob/master/openshift/kube_token.go
-func (kc *kubeClient) putResource(url string, putBody []byte) (*string, error) {
-	fullURL := strings.TrimSuffix(kc.config.ClusterURL, "/") + url
-	req, err := http.NewRequest("PUT", fullURL, bytes.NewBuffer(putBody))
+func (oc *openShiftAPIClient) putResource(url string, putBody map[string]interface{}) error {
+	marshalled, err := json.Marshal(putBody)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	req.Header.Set("Content-Type", "application/yaml")
-	req.Header.Set("Accept", "application/yaml")
-	req.Header.Set("Authorization", "Bearer "+kc.config.BearerToken)
+
+	fullURL := strings.TrimSuffix(oc.config.ClusterURL, "/") + url
+	req, err := http.NewRequest("PUT", fullURL, bytes.NewBuffer(marshalled))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+oc.config.BearerToken)
 
 	client := http.DefaultClient
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
-	}
-
-	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+		return err
 	}
 
 	status := resp.StatusCode
 	if httpStatusFailed(status) {
-		return nil, fmt.Errorf("Failed to PUT url %s: status code %d", fullURL, status)
+		return fmt.Errorf("Failed to PUT url %s: status code %d", fullURL, status)
 	}
-	bodyStr := string(body)
-	return &bodyStr, nil
+	return nil
 }
 
 func (kc *kubeClient) getDeploymentConfig(namespace string, appName string, space string) (*deployment, error) {
-	dcURL := fmt.Sprintf("/oapi/v1/namespaces/%s/deploymentconfigs/%s", namespace, appName)
-	result, err := kc.getResource(dcURL, true)
+	result, err := kc.GetDeploymentConfig(namespace, appName)
 	if err != nil {
 		return nil, err
 	} else if result == nil {
@@ -603,12 +626,12 @@ func (kc *kubeClient) getDeploymentConfig(namespace string, appName string, spac
 	if !ok || kind != "DeploymentConfig" {
 		return nil, errors.New("No deployment config returned from endpoint")
 	}
-	metadata, ok := result["metadata"].(map[interface{}]interface{})
+	metadata, ok := result["metadata"].(map[string]interface{})
 	if !ok {
 		return nil, errors.New("Metadata missing from deployment config")
 	}
 	// Check the space label is what we expect
-	labels, ok := metadata["labels"].(map[interface{}]interface{})
+	labels, ok := metadata["labels"].(map[string]interface{})
 	if !ok {
 		return nil, errors.New("Labels missing from deployment config")
 	}
@@ -636,6 +659,11 @@ func (kc *kubeClient) getDeploymentConfig(namespace string, appName string, spac
 		appVersion: version,
 	}
 	return dc, nil
+}
+
+func (oc *openShiftAPIClient) GetDeploymentConfig(namespace string, name string) (map[string]interface{}, error) {
+	dcURL := fmt.Sprintf("/oapi/v1/namespaces/%s/deploymentconfigs/%s", namespace, name)
+	return oc.getResource(dcURL, true)
 }
 
 func (kc *kubeClient) getCurrentDeployment(space string, appName string, namespace string) (*deployment, error) {
@@ -837,15 +865,15 @@ func (kc *kubeClient) getPodStatus(pods []v1.Pod) (*app.PodStatsV1, error) {
 }
 
 // Derived from: https://github.com/fabric8-services/fabric8-tenant/blob/master/openshift/kube_token.go
-func (kc *kubeClient) getResource(url string, allowMissing bool) (map[interface{}]interface{}, error) {
+func (oc *openShiftAPIClient) getResource(url string, allowMissing bool) (map[string]interface{}, error) {
 	var body []byte
-	fullURL := strings.TrimSuffix(kc.config.ClusterURL, "/") + url
+	fullURL := strings.TrimSuffix(oc.config.ClusterURL, "/") + url
 	req, err := http.NewRequest("GET", fullURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/yaml")
-	req.Header.Set("Authorization", "Bearer "+kc.config.BearerToken)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+oc.config.BearerToken)
 
 	client := http.DefaultClient
 	resp, err := client.Do(req)
@@ -865,8 +893,8 @@ func (kc *kubeClient) getResource(url string, allowMissing bool) (map[interface{
 	} else if httpStatusFailed(status) {
 		return nil, fmt.Errorf("Failed to GET url %s due to status code %d", fullURL, status)
 	}
-	var respType map[interface{}]interface{}
-	err = yaml.Unmarshal(b, &respType)
+	var respType map[string]interface{}
+	err = json.Unmarshal(b, &respType)
 	if err != nil {
 		return nil, err
 	}

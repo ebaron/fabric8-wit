@@ -1,6 +1,8 @@
 package kubernetesV1_test
 
 import (
+	"encoding/json"
+	"io/ioutil"
 	"strconv"
 	"testing"
 	"time"
@@ -427,45 +429,114 @@ func TestGetEnvironment(t *testing.T) {
 	}
 }
 
-type spaceTestData struct {
-	kubernetesV1.BuildConfigInterface
-	name       string
-	shouldFail bool
-	configs    *[]string
+type testOpenShift struct {
+	getter *testOpenShiftGetter
 }
 
-func (sp spaceTestData) GetBuildConfigs(space string) ([]string, error) {
-	if sp.configs == nil {
-		return nil, nil
+type testOpenShiftGetter struct {
+	result  *testOpenShift
+	spInput *spaceTestData
+}
+
+type spaceTestData struct {
+	name       string
+	shouldFail bool
+	bcJson     string
+}
+
+const pathToTestJSON = "../test/kubernetes/"
+
+func (getter *testOpenShiftGetter) GetOpenShiftRESTAPI(config *kubernetes.KubeClientConfig) (kubernetes.OpenShiftRESTAPI, error) {
+	oapi := &testOpenShift{
+		getter: getter,
 	}
-	return *sp.configs, nil
+	return oapi, nil
+}
+
+func (to *testOpenShift) GetBuildConfigs(namespace string, labelSelector string) (map[string]interface{}, error) {
+	filename := pathToTestJSON + to.getter.spInput.bcJson
+	return readJSON(filename)
+}
+
+func (to *testOpenShift) GetDeploymentConfig(namespace string, name string) (map[string]interface{}, error) {
+	return nil, nil // TODO
+}
+
+func (to *testOpenShift) GetDeploymentConfigScale(namespace string, name string) (map[string]interface{}, error) {
+	return nil, nil // TODO
+}
+
+func (to *testOpenShift) SetDeploymentConfigScale(namespace string, name string, scale map[string]interface{}) error {
+	return nil // TODO
+}
+
+func readJSON(filename string) (map[string]interface{}, error) {
+	jsonBytes, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]interface{}
+	err = json.Unmarshal(jsonBytes, &result)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func TestGetSpaceWithNoConfigs(t *testing.T) {
 	testCases := []*spaceTestData{
 		{
-			name:       "nilCfg", // Bad environment name
-			configs:    nil,
-			shouldFail: false,
+			name:   "run",
+			bcJson: "buildconfigs-emptylist.json",
+		},
+		{
+			name:       "run",
+			bcJson:     "buildconfigs-wronglist.json",
+			shouldFail: true,
+		},
+		{
+			name:       "run",
+			bcJson:     "buildconfigs-noitems.json",
+			shouldFail: true,
+		},
+		{
+			name:       "run",
+			bcJson:     "buildconfigs-notobject.json",
+			shouldFail: true,
+		},
+		{
+			name:       "run",
+			bcJson:     "buildconfigs-nometadata.json",
+			shouldFail: true,
+		},
+		{
+			name:       "run",
+			bcJson:     "buildconfigs-noname.json",
+			shouldFail: true,
+		},
+		{
+			name:   "run",
+			bcJson: "buildconfigs-two.json",
 		},
 	}
 
+	kubeGetter := &testKubeGetter{}
+	metricsGetter := &testMetricsGetter{}
+	openShiftGetter := &testOpenShiftGetter{}
+	config := &kubernetesV1.KubeClientConfig{
+		ClusterURL:             "http://api.myCluster",
+		BearerToken:            "myToken",
+		UserNamespace:          "myNamespace",
+		KubeRESTAPIGetter:      kubeGetter,
+		MetricsGetter:          metricsGetter,
+		OpenShiftRESTAPIGetter: openShiftGetter,
+	}
+
+	kc, err := kubernetes.NewKubeClient(config)
+	require.NoError(t, err)
+
 	for _, testCase := range testCases {
-		kubeGetter := &testKubeGetter{}
-		metricsGetter := &testMetricsGetter{}
-		cfgGetter := testCase
-		config := &kubernetesV1.KubeClientConfig{
-			ClusterURL:           "http://api.myCluster",
-			BearerToken:          "myToken",
-			UserNamespace:        "myNamespace",
-			KubeRESTAPIGetter:    kubeGetter,
-			MetricsGetter:        metricsGetter,
-			BuildConfigInterface: cfgGetter,
-		}
-
-		kc, err := kubernetesV1.NewKubeClient(config)
-
-		assert.NoError(t, err)
+		openShiftGetter.spInput = testCase
 		space, err := kc.GetSpace(testCase.name)
 		if testCase.shouldFail {
 			assert.Error(t, err)
@@ -474,6 +545,7 @@ func TestGetSpaceWithNoConfigs(t *testing.T) {
 				continue
 			}
 			assert.NotNil(t, space.Applications)
+			// TODO test applications
 		}
 	}
 }
