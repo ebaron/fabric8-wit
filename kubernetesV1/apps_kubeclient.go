@@ -209,6 +209,7 @@ func (kc *kubeClient) GetSpace(spaceName string) (*app.SimpleSpaceV1, error) {
 	}
 
 	result := &app.SimpleSpaceV1{
+		Name:         &spaceName,
 		Applications: apps,
 	}
 

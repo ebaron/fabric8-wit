@@ -2,6 +2,7 @@ package kubernetesV1_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"strconv"
 	"testing"
@@ -26,19 +27,21 @@ const pathToTestJSON = "../test/kubernetes/"
 
 type testKube struct {
 	kubernetesV1.KubeRESTAPI // Allows us to only implement methods we'll use
-	getter                   *testKubeGetter
+	getter                   *testGetter
 	configMapHolder          *testConfigMap
 	quotaHolder              *testResourceQuota
 	rcHolder                 *testReplicationController
 	podHolder                *testPod
 }
 
-type testKubeGetter struct {
+type testGetter struct {
 	cmInput  *configMapInput
 	rqInput  *resourceQuotaInput
-	rcInput  *replicationControllerInput
-	podInput *podInput
+	spInput  *spaceTestData
+	appInput *appTestData
+	depInput *deployTestData
 	result   *testKube
+	os       *testOpenShift
 }
 
 // Config Maps fakes
@@ -187,10 +190,7 @@ type testReplicationController struct {
 }
 
 func (tk *testKube) ReplicationControllers(ns string) corev1.ReplicationControllerInterface {
-	input := tk.getter.rcInput
-	if input == nil {
-		input = defaultReplicationControllerInput
-	}
+	depInput := tk.getter
 	result := &testReplicationController{
 		input:     input,
 		namespace: ns,
@@ -218,6 +218,7 @@ type podInput struct {
 var defaultPodInput = &podInput{
 	podJson:       "pods.json",
 	expectRunning: 2,
+	expectTotal:   2,
 }
 
 type testPod struct {
@@ -245,7 +246,7 @@ func (rc *testPod) List(options metav1.ListOptions) (*v1.PodList, error) {
 	return &result, err
 }
 
-func (getter *testKubeGetter) GetKubeRESTAPI(config *kubernetesV1.KubeClientConfig) (kubernetesV1.KubeRESTAPI, error) {
+func (getter *testGetter) GetKubeRESTAPI(config *kubernetesV1.KubeClientConfig) (kubernetesV1.KubeRESTAPI, error) {
 	mock := new(testKube)
 	// Doubly-linked for access by tests
 	mock.getter = getter
@@ -309,7 +310,7 @@ func (testMetrics) GetNetworkRecvMetricsRange(pods []v1.Pod, namespace string, s
 }
 
 func TestGetMetrics(t *testing.T) {
-	kubeGetter := &testKubeGetter{}
+	kubeGetter := &testGetter{}
 	metricsGetter := &testMetricsGetter{}
 
 	token := "myToken"
@@ -396,7 +397,7 @@ func TestConfigMapEnvironments(t *testing.T) {
 			shouldFail: true, // No provider
 		},
 	}
-	kubeGetter := &testKubeGetter{}
+	kubeGetter := &testGetter{}
 	metricsGetter := &testMetricsGetter{}
 	userNamespace := "myNamespace"
 	config := &kubernetesV1.KubeClientConfig{
@@ -464,7 +465,7 @@ func TestGetEnvironment(t *testing.T) {
 			shouldFail: true, // No quantities, so our test impl returns nil
 		},
 	}
-	kubeGetter := &testKubeGetter{}
+	kubeGetter := &testGetter{}
 	metricsGetter := &testMetricsGetter{}
 	config := &kubernetesV1.KubeClientConfig{
 		ClusterURL:        "http://api.myCluster",
@@ -510,33 +511,42 @@ func TestGetEnvironment(t *testing.T) {
 }
 
 type testOpenShift struct {
-	getter *testOpenShiftGetter
-}
-
-type testOpenShiftGetter struct {
-	result   *testOpenShift
-	spInput  *spaceTestData
-	appInput *appTestData
-	depInput *deployTestData
+	getter *testGetter
 }
 
 type spaceTestData struct {
 	name       string
 	shouldFail bool
 	bcJson     string
+	appInput   map[string]*appTestData // Keys are app names
+}
+
+const defaultBuildConfig = "buildconfigs-one.json"
+
+var defaultSpaceTestData = &spaceTestData{
+	name:     "mySpace",
+	bcJson:   defaultBuildConfig,
+	appInput: map[string]*appTestData{"myApp": defaultAppTestData},
 }
 
 type appTestData struct {
-	spaceName  string
-	appName    string
-	shouldFail bool
-	dcJson     string // FIXME
+	spaceName   string
+	appName     string
+	shouldFail  bool
+	deployInput map[string]*deployTestData // Keys are namespaces
+}
+
+var defaultAppTestData = &appTestData{
+	spaceName:   "mySpace",
+	appName:     "myApp",
+	deployInput: map[string]*deployTestData{"my-run": defaultDeployTestData},
 }
 
 type deployTestData struct {
 	spaceName     string
 	appName       string
 	envName       string
+	envNS         string
 	expectVersion string
 	shouldFail    bool
 	dcJson        string
@@ -546,7 +556,18 @@ type deployTestData struct {
 
 const defaultDeploymentConfig = "deploymentconfig-one.json"
 
-func (getter *testOpenShiftGetter) GetOpenShiftRESTAPI(config *kubernetesV1.KubeClientConfig) (kubernetesV1.OpenShiftRESTAPI, error) {
+var defaultDeployTestData = &deployTestData{
+	spaceName:     "mySpace",
+	appName:       "myApp",
+	envName:       "run",
+	envNS:         "my-run",
+	dcJson:        defaultDeploymentConfig,
+	rcInput:       defaultReplicationControllerInput,
+	podInput:      defaultPodInput,
+	expectVersion: "1.0.2",
+}
+
+func (getter *testGetter) GetOpenShiftRESTAPI(config *kubernetesV1.KubeClientConfig) (kubernetesV1.OpenShiftRESTAPI, error) {
 	oapi := &testOpenShift{
 		getter: getter,
 	}
@@ -556,7 +577,7 @@ func (getter *testOpenShiftGetter) GetOpenShiftRESTAPI(config *kubernetesV1.Kube
 func (to *testOpenShift) GetBuildConfigs(namespace string, labelSelector string) (map[string]interface{}, error) {
 	input := to.getter.spInput
 	if input == nil {
-		return nil, nil // TODO use default
+		input = defaultSpaceTestData
 	}
 	var result map[string]interface{}
 	err := readJSON(input.bcJson, &result)
@@ -564,13 +585,35 @@ func (to *testOpenShift) GetBuildConfigs(namespace string, labelSelector string)
 }
 
 func (to *testOpenShift) GetDeploymentConfig(namespace string, name string) (map[string]interface{}, error) {
-	input := to.getter.depInput
-	if input == nil {
-		return nil, nil // TODO use default
+	input := to.getter.getDeploymentInput(namespace, name)
+	if input.envNS != namespace || input.appName != name {
+		// No matching DC
+		return nil, nil
 	}
 	var result map[string]interface{}
 	err := readJSON(input.dcJson, &result)
 	return result, err
+}
+
+func (g *testGetter) getDeploymentInput(namespace string, name string) *deployTestData {
+	var input *deployTestData
+	spInput := g.spInput
+	if spInput != nil { // Called from GetSpace
+		appInput := spInput.appInput[name]
+		if appInput != nil {
+			input = appInput.deployInput[namespace]
+		}
+	} else if appInput := g.appInput; appInput != nil { // Called from GetApplication
+		input = appInput.deployInput[namespace]
+	} else { // Called from GetDeployment
+		input = g.depInput
+	}
+
+	// Use default if not otherwise specified
+	if input == nil {
+		input = defaultDeployTestData
+	}
+	return input
 }
 
 func (to *testOpenShift) GetDeploymentConfigScale(namespace string, name string) (map[string]interface{}, error) {
@@ -597,57 +640,56 @@ func readJSON(filename string, dest interface{}) error {
 func TestGetSpace(t *testing.T) {
 	testCases := []*spaceTestData{
 		{
-			name:   "run",
+			name:   "mySpace",
 			bcJson: "buildconfigs-emptylist.json",
 		},
 		{
-			name:       "run",
+			name:       "mySpace",
 			bcJson:     "buildconfigs-wronglist.json",
 			shouldFail: true,
 		},
 		{
-			name:       "run",
+			name:       "mySpace",
 			bcJson:     "buildconfigs-noitems.json",
 			shouldFail: true,
 		},
 		{
-			name:       "run",
+			name:       "mySpace",
 			bcJson:     "buildconfigs-notobject.json",
 			shouldFail: true,
 		},
 		{
-			name:       "run",
+			name:       "mySpace",
 			bcJson:     "buildconfigs-nometadata.json",
 			shouldFail: true,
 		},
 		{
-			name:       "run",
+			name:       "mySpace",
 			bcJson:     "buildconfigs-noname.json",
 			shouldFail: true,
 		},
 		{
-			name:   "run",
+			name:   "mySpace",
 			bcJson: "buildconfigs-two.json",
 		},
 	}
 
-	kubeGetter := &testKubeGetter{}
+	kubeGetter := &testGetter{}
 	metricsGetter := &testMetricsGetter{}
-	openShiftGetter := &testOpenShiftGetter{}
 	config := &kubernetesV1.KubeClientConfig{
 		ClusterURL:             "http://api.myCluster",
 		BearerToken:            "myToken",
 		UserNamespace:          "myNamespace",
 		KubeRESTAPIGetter:      kubeGetter,
 		MetricsGetter:          metricsGetter,
-		OpenShiftRESTAPIGetter: openShiftGetter,
+		OpenShiftRESTAPIGetter: kubeGetter,
 	}
 
 	kc, err := kubernetesV1.NewKubeClient(config)
 	require.NoError(t, err)
 
 	for _, testCase := range testCases {
-		openShiftGetter.spInput = testCase
+		kubeGetter.spInput = testCase
 		space, err := kc.GetSpace(testCase.name)
 		if testCase.shouldFail {
 			assert.Error(t, err)
@@ -656,6 +698,7 @@ func TestGetSpace(t *testing.T) {
 				continue
 			}
 			assert.NotNil(t, space, "Space is nil")
+			assert.Equal(t, testCase.name, *space.Name, "Space name is incorrect")
 			assert.NotNil(t, space.Applications, "Applications are nil")
 			// TODO test applications
 		}
@@ -664,30 +707,47 @@ func TestGetSpace(t *testing.T) {
 
 func TestGetApplication(t *testing.T) {
 	testCases := []*appTestData{
+		defaultAppTestData, // TODO test multiple deployments
 		{
 			spaceName: "mySpace",
 			appName:   "myApp",
-			dcJson:    defaultDeploymentConfig,
+			deployInput: map[string]*deployTestData{
+				"my-run": defaultDeployTestData,
+				"my-stage": {
+					spaceName: "mySpace",
+					appName:   "myApp",
+					envName:   "stage",
+					envNS:     "my-stage",
+					dcJson:    "deploymentconfig-one-stage.json",
+					rcInput:   defaultReplicationControllerInput,
+					podInput: &podInput{
+						podJson:        "pods-one-stopped.json",
+						expectRunning:  1,
+						expectStopping: 1,
+						expectTotal:    2,
+					},
+					expectVersion: "1.0.3",
+				},
+			},
 		},
 	}
 
-	kubeGetter := &testKubeGetter{}
+	kubeGetter := &testGetter{}
 	metricsGetter := &testMetricsGetter{}
-	openShiftGetter := &testOpenShiftGetter{}
 	config := &kubernetesV1.KubeClientConfig{
 		ClusterURL:             "http://api.myCluster",
 		BearerToken:            "myToken",
 		UserNamespace:          "myNamespace",
 		KubeRESTAPIGetter:      kubeGetter,
 		MetricsGetter:          metricsGetter,
-		OpenShiftRESTAPIGetter: openShiftGetter,
+		OpenShiftRESTAPIGetter: kubeGetter,
 	}
 
 	kc, err := kubernetesV1.NewKubeClient(config)
 	require.NoError(t, err)
 
 	for _, testCase := range testCases {
-		openShiftGetter.appInput = testCase
+		kubeGetter.appInput = testCase
 		app, err := kc.GetApplication(testCase.spaceName, testCase.appName)
 		if testCase.shouldFail {
 			assert.Error(t, err)
@@ -695,28 +755,14 @@ func TestGetApplication(t *testing.T) {
 			if !assert.NoError(t, err) {
 				continue
 			}
-			if !assert.NotNil(t, app, "Application is nil") {
-				continue
-			}
-			assert.NotNil(t, app.Name, "Application name is nil")
-			assert.Equal(t, testCase.appName, *app.Name, "Incorrect application name")
-			assert.NotNil(t, app.Pipeline, "Deployments are nil")
-			// TODO test deployment
+			verifyApplication(app, testCase, t)
 		}
 	}
 }
 
 func TestGetDeployment(t *testing.T) {
 	testCases := []*deployTestData{
-		{
-			spaceName:     "mySpace",
-			appName:       "myApp",
-			envName:       "run",
-			dcJson:        defaultDeploymentConfig,
-			rcInput:       defaultReplicationControllerInput,
-			podInput:      defaultPodInput,
-			expectVersion: "1.0.2",
-		},
+		defaultDeployTestData,
 		{
 			spaceName:  "mySpace",
 			appName:    "myApp",
@@ -726,25 +772,21 @@ func TestGetDeployment(t *testing.T) {
 		},
 	}
 
-	kubeGetter := &testKubeGetter{}
+	kubeGetter := &testGetter{}
 	metricsGetter := &testMetricsGetter{}
-	openShiftGetter := &testOpenShiftGetter{}
 	config := &kubernetesV1.KubeClientConfig{
-		ClusterURL:             "http://api.myCluster",
-		BearerToken:            "myToken",
-		UserNamespace:          "myNamespace",
-		KubeRESTAPIGetter:      kubeGetter,
-		MetricsGetter:          metricsGetter,
-		OpenShiftRESTAPIGetter: openShiftGetter,
+		ClusterURL:        "http://api.myCluster",
+		BearerToken:       "myToken",
+		UserNamespace:     "myNamespace",
+		KubeRESTAPIGetter: kubeGetter,
+		MetricsGetter:     metricsGetter,
 	}
 
 	kc, err := kubernetesV1.NewKubeClient(config)
 	require.NoError(t, err)
 
 	for _, testCase := range testCases {
-		openShiftGetter.depInput = testCase
-		kubeGetter.rcInput = testCase.rcInput
-		kubeGetter.podInput = testCase.podInput
+		kubeGetter.depInput = testCase
 
 		dep, err := kc.GetDeployment(testCase.spaceName, testCase.appName, testCase.envName)
 		if testCase.shouldFail {
@@ -753,22 +795,55 @@ func TestGetDeployment(t *testing.T) {
 			if !assert.NoError(t, err) {
 				continue
 			}
-			if !assert.NotNil(t, dep, "Deployment is nil") {
-				continue
-			}
-			if assert.NotNil(t, dep.Name, "Deployment name is nil") {
-				assert.Equal(t, testCase.envName, *dep.Name, "Incorrect deployment name")
-			}
-			if assert.NotNil(t, dep.Version, "Deployments version is nil") {
-				assert.Equal(t, testCase.expectVersion, *dep.Version, "Incorrect deployment version")
-			}
-			// TODO use assert.ElementsMatch when moving to new pod status format
-			if assert.NotNil(t, dep.Pods, "Pods are nil") {
-				assert.Equal(t, testCase.podInput.expectRunning, *dep.Pods.Running, "Wrong number of running pods")
-				assert.Equal(t, testCase.podInput.expectStarting, *dep.Pods.Starting, "Wrong number of starting pods")
-				assert.Equal(t, testCase.podInput.expectStopping, *dep.Pods.Stopping, "Wrong number of stopping pods")
-				assert.Equal(t, testCase.podInput.expectTotal, *dep.Pods.Total, "Wrong number of total pods")
-			}
+			verifyDeployment(dep, testCase, t)
 		}
+	}
+}
+
+func verifyApplication(app *app.SimpleApp, testCase *appTestData, t *testing.T) {
+	if !assert.NotNil(t, app, "Application is nil") {
+		return
+	}
+	assert.NotNil(t, app.Name, "Application name is nil")
+	assert.Equal(t, testCase.appName, *app.Name, "Incorrect application name")
+	assert.NotNil(t, app.Pipeline, "Deployments are nil")
+	if !assert.Equal(t, len(testCase.deployInput), len(app.Pipeline), "Wrong number of deployments") {
+		return
+	}
+	for _, dep := range app.Pipeline {
+		var depInput *deployTestData
+		fmt.Printf("%v %v %v\n", *dep.Name, *dep.Version, *dep.Pods)
+		if dep != nil && dep.Name != nil {
+			depInput = findMatchingDeploymentInput(*dep.Name, testCase.deployInput)
+		}
+		verifyDeployment(dep, depInput, t)
+	}
+}
+
+func findMatchingDeploymentInput(envName string, inputs map[string]*deployTestData) *deployTestData {
+	for _, input := range inputs {
+		if input.envName == envName {
+			return input
+		}
+	}
+	return nil
+}
+
+func verifyDeployment(dep *app.SimpleDeployment, testCase *deployTestData, t *testing.T) {
+	if !assert.NotNil(t, dep, "Deployment is nil") {
+		return
+	}
+	if assert.NotNil(t, dep.Name, "Deployment name is nil") {
+		assert.Equal(t, testCase.envName, *dep.Name, "Incorrect deployment name")
+	}
+	if assert.NotNil(t, dep.Version, "Deployments version is nil") {
+		assert.Equal(t, testCase.expectVersion, *dep.Version, "Incorrect deployment version")
+	}
+	// TODO use assert.ElementsMatch when moving to new pod status format
+	if assert.NotNil(t, dep.Pods, "Pods are nil") {
+		assert.Equal(t, testCase.podInput.expectRunning, *dep.Pods.Running, "Wrong number of running pods")
+		assert.Equal(t, testCase.podInput.expectStarting, *dep.Pods.Starting, "Wrong number of starting pods")
+		assert.Equal(t, testCase.podInput.expectStopping, *dep.Pods.Stopping, "Wrong number of stopping pods")
+		assert.Equal(t, testCase.podInput.expectTotal, *dep.Pods.Total, "Wrong number of total pods")
 	}
 }
