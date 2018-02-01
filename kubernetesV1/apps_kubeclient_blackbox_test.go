@@ -2,7 +2,6 @@ package kubernetesV1_test
 
 import (
 	"encoding/json"
-	"fmt"
 	"io/ioutil"
 	"strconv"
 	"testing"
@@ -34,14 +33,35 @@ type testKube struct {
 	podHolder                *testPod
 }
 
-type testGetter struct {
+type testGetter struct { // TODO maybe rename to testFixture
 	cmInput  *configMapInput
 	rqInput  *resourceQuotaInput
-	spInput  *spaceTestData
-	appInput *appTestData
-	depInput *deployTestData
+	rcInput  map[string]*replicationControllerInput // TODO these can just be strings
+	podInput map[string]*podInput
+	bcInput  string
+	dcInput  deploymentConfigInput
 	result   *testKube
 	os       *testOpenShift
+}
+
+type deploymentConfigInput map[string]map[string]string
+
+var defaultDeploymentConfigInput = deploymentConfigInput{
+	"myApp": {
+		"my-run": "deploymentconfig-one.json",
+	},
+}
+
+func (input deploymentConfigInput) getInput(appName string, envNS string) *string {
+	inputForApp, pres := input[appName]
+	if !pres {
+		return nil
+	}
+	inputForEnv, pres := inputForApp[envNS]
+	if !pres {
+		return nil
+	}
+	return &inputForEnv
 }
 
 // Config Maps fakes
@@ -190,7 +210,7 @@ type testReplicationController struct {
 }
 
 func (tk *testKube) ReplicationControllers(ns string) corev1.ReplicationControllerInterface {
-	depInput := tk.getter
+	input := tk.getter.rcInput[ns]
 	result := &testReplicationController{
 		input:     input,
 		namespace: ns,
@@ -201,6 +221,10 @@ func (tk *testKube) ReplicationControllers(ns string) corev1.ReplicationControll
 
 func (rc *testReplicationController) List(options metav1.ListOptions) (*v1.ReplicationControllerList, error) {
 	var result v1.ReplicationControllerList
+	if rc.input == nil {
+		// No matching RC
+		return &result, nil
+	}
 	err := readJSON(rc.input.rcJson, &result)
 	return &result, err
 }
@@ -208,17 +232,11 @@ func (rc *testReplicationController) List(options metav1.ListOptions) (*v1.Repli
 // Pod fakes
 
 type podInput struct {
-	podJson        string
-	expectStarting int
-	expectStopping int
-	expectRunning  int
-	expectTotal    int
+	podJson string
 }
 
 var defaultPodInput = &podInput{
-	podJson:       "pods.json",
-	expectRunning: 2,
-	expectTotal:   2,
+	podJson: "pods.json",
 }
 
 type testPod struct {
@@ -228,10 +246,7 @@ type testPod struct {
 }
 
 func (tk *testKube) Pods(ns string) corev1.PodInterface {
-	input := tk.getter.podInput
-	if input == nil {
-		input = defaultPodInput
-	}
+	input := tk.getter.podInput[ns]
 	result := &testPod{
 		input:     input,
 		namespace: ns,
@@ -240,9 +255,13 @@ func (tk *testKube) Pods(ns string) corev1.PodInterface {
 	return result
 }
 
-func (rc *testPod) List(options metav1.ListOptions) (*v1.PodList, error) {
+func (pod *testPod) List(options metav1.ListOptions) (*v1.PodList, error) {
 	var result v1.PodList
-	err := readJSON(rc.input.podJson, &result)
+	if pod.input == nil {
+		// No matching pods
+		return &result, nil
+	}
+	err := readJSON(pod.input.podJson, &result)
 	return &result, err
 }
 
@@ -519,6 +538,9 @@ type spaceTestData struct {
 	shouldFail bool
 	bcJson     string
 	appInput   map[string]*appTestData // Keys are app names
+	dcInput    deploymentConfigInput
+	rcInput    map[string]*replicationControllerInput
+	podInput   map[string]*podInput
 }
 
 const defaultBuildConfig = "buildconfigs-one.json"
@@ -527,44 +549,71 @@ var defaultSpaceTestData = &spaceTestData{
 	name:     "mySpace",
 	bcJson:   defaultBuildConfig,
 	appInput: map[string]*appTestData{"myApp": defaultAppTestData},
+	dcInput:  defaultDeploymentConfigInput,
+	rcInput: map[string]*replicationControllerInput{
+		"my-run": defaultReplicationControllerInput,
+	},
+	podInput: map[string]*podInput{
+		"my-run": defaultPodInput,
+	},
 }
 
 type appTestData struct {
 	spaceName   string
 	appName     string
 	shouldFail  bool
-	deployInput map[string]*deployTestData // Keys are namespaces
+	deployInput map[string]*deployTestData // Keys are environment names
+	dcInput     deploymentConfigInput
+	rcInput     map[string]*replicationControllerInput
+	podInput    map[string]*podInput
 }
 
 var defaultAppTestData = &appTestData{
 	spaceName:   "mySpace",
 	appName:     "myApp",
-	deployInput: map[string]*deployTestData{"my-run": defaultDeployTestData},
+	deployInput: map[string]*deployTestData{"run": defaultDeployTestData},
+	dcInput:     defaultDeploymentConfigInput,
+	rcInput: map[string]*replicationControllerInput{
+		"my-run": defaultReplicationControllerInput,
+	},
+	podInput: map[string]*podInput{
+		"my-run": defaultPodInput,
+	},
 }
 
 type deployTestData struct {
-	spaceName     string
-	appName       string
-	envName       string
-	envNS         string
-	expectVersion string
-	shouldFail    bool
-	dcJson        string
-	rcInput       *replicationControllerInput
-	podInput      *podInput
+	spaceName          string
+	appName            string
+	envName            string
+	envNS              string
+	expectVersion      string
+	expectPodsRunning  int
+	expectPodsStarting int
+	expectPodsStopping int
+	expectPodsTotal    int
+	shouldFail         bool
+	dcInput            deploymentConfigInput
+	rcInput            map[string]*replicationControllerInput
+	podInput           map[string]*podInput
 }
 
 const defaultDeploymentConfig = "deploymentconfig-one.json"
 
 var defaultDeployTestData = &deployTestData{
-	spaceName:     "mySpace",
-	appName:       "myApp",
-	envName:       "run",
-	envNS:         "my-run",
-	dcJson:        defaultDeploymentConfig,
-	rcInput:       defaultReplicationControllerInput,
-	podInput:      defaultPodInput,
-	expectVersion: "1.0.2",
+	spaceName:         "mySpace",
+	appName:           "myApp",
+	envName:           "run",
+	envNS:             "my-run",
+	expectVersion:     "1.0.2",
+	expectPodsRunning: 2,
+	expectPodsTotal:   2,
+	dcInput:           defaultDeploymentConfigInput,
+	rcInput: map[string]*replicationControllerInput{
+		"my-run": defaultReplicationControllerInput,
+	},
+	podInput: map[string]*podInput{
+		"my-run": defaultPodInput,
+	},
 }
 
 func (getter *testGetter) GetOpenShiftRESTAPI(config *kubernetesV1.KubeClientConfig) (kubernetesV1.OpenShiftRESTAPI, error) {
@@ -575,45 +624,25 @@ func (getter *testGetter) GetOpenShiftRESTAPI(config *kubernetesV1.KubeClientCon
 }
 
 func (to *testOpenShift) GetBuildConfigs(namespace string, labelSelector string) (map[string]interface{}, error) {
-	input := to.getter.spInput
-	if input == nil {
-		input = defaultSpaceTestData
-	}
 	var result map[string]interface{}
-	err := readJSON(input.bcJson, &result)
+	input := to.getter.bcInput
+	if len(input) == 0 {
+		// No matching BCs
+		return result, nil
+	}
+	err := readJSON(input, &result)
 	return result, err
 }
 
 func (to *testOpenShift) GetDeploymentConfig(namespace string, name string) (map[string]interface{}, error) {
-	input := to.getter.getDeploymentInput(namespace, name)
-	if input.envNS != namespace || input.appName != name {
+	input := to.getter.dcInput.getInput(name, namespace)
+	if input == nil {
 		// No matching DC
 		return nil, nil
 	}
 	var result map[string]interface{}
-	err := readJSON(input.dcJson, &result)
+	err := readJSON(*input, &result)
 	return result, err
-}
-
-func (g *testGetter) getDeploymentInput(namespace string, name string) *deployTestData {
-	var input *deployTestData
-	spInput := g.spInput
-	if spInput != nil { // Called from GetSpace
-		appInput := spInput.appInput[name]
-		if appInput != nil {
-			input = appInput.deployInput[namespace]
-		}
-	} else if appInput := g.appInput; appInput != nil { // Called from GetApplication
-		input = appInput.deployInput[namespace]
-	} else { // Called from GetDeployment
-		input = g.depInput
-	}
-
-	// Use default if not otherwise specified
-	if input == nil {
-		input = defaultDeployTestData
-	}
-	return input
 }
 
 func (to *testOpenShift) GetDeploymentConfigScale(namespace string, name string) (map[string]interface{}, error) {
@@ -668,10 +697,25 @@ func TestGetSpace(t *testing.T) {
 			bcJson:     "buildconfigs-noname.json",
 			shouldFail: true,
 		},
+		defaultSpaceTestData,
 		{
 			name:   "mySpace",
 			bcJson: "buildconfigs-two.json",
-		},
+			appInput: map[string]*appTestData{
+				"myApp": defaultAppTestData,
+				"myOtherApp": &appTestData{
+					spaceName: "mySpace",
+					appName:   "myOtherApp",
+				},
+			},
+			dcInput: defaultDeploymentConfigInput,
+			rcInput: map[string]*replicationControllerInput{
+				"my-run": defaultReplicationControllerInput,
+			},
+			podInput: map[string]*podInput{
+				"my-run": defaultPodInput,
+			},
+		}, // TODO test >1 apps with >1 deployments
 	}
 
 	kubeGetter := &testGetter{}
@@ -689,7 +733,11 @@ func TestGetSpace(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, testCase := range testCases {
-		kubeGetter.spInput = testCase
+		kubeGetter.bcInput = testCase.bcJson
+		kubeGetter.dcInput = testCase.dcInput
+		kubeGetter.rcInput = testCase.rcInput
+		kubeGetter.podInput = testCase.podInput
+
 		space, err := kc.GetSpace(testCase.name)
 		if testCase.shouldFail {
 			assert.Error(t, err)
@@ -700,35 +748,56 @@ func TestGetSpace(t *testing.T) {
 			assert.NotNil(t, space, "Space is nil")
 			assert.Equal(t, testCase.name, *space.Name, "Space name is incorrect")
 			assert.NotNil(t, space.Applications, "Applications are nil")
-			// TODO test applications
+			for _, app := range space.Applications {
+				var appInput *appTestData
+				if app != nil && app.Name != nil {
+					appInput = testCase.appInput[*app.Name]
+					require.NotNil(t, appInput, "Unknown app: "+*app.Name)
+				}
+				verifyApplication(app, appInput, t)
+			}
 		}
 	}
 }
 
 func TestGetApplication(t *testing.T) {
+	dcInput := deploymentConfigInput{
+		"myApp": {
+			"my-run":   defaultDeploymentConfig,
+			"my-stage": "deploymentconfig-one-stage.json",
+		},
+	}
+	rcInput := map[string]*replicationControllerInput{
+		"my-run":   defaultReplicationControllerInput,
+		"my-stage": defaultReplicationControllerInput,
+	}
+	podInput := map[string]*podInput{
+		"my-run": defaultPodInput,
+		"my-stage": {
+			podJson: "pods-one-stopped.json",
+		},
+	}
 	testCases := []*appTestData{
 		defaultAppTestData, // TODO test multiple deployments
 		{
 			spaceName: "mySpace",
 			appName:   "myApp",
 			deployInput: map[string]*deployTestData{
-				"my-run": defaultDeployTestData,
-				"my-stage": {
-					spaceName: "mySpace",
-					appName:   "myApp",
-					envName:   "stage",
-					envNS:     "my-stage",
-					dcJson:    "deploymentconfig-one-stage.json",
-					rcInput:   defaultReplicationControllerInput,
-					podInput: &podInput{
-						podJson:        "pods-one-stopped.json",
-						expectRunning:  1,
-						expectStopping: 1,
-						expectTotal:    2,
-					},
-					expectVersion: "1.0.3",
+				"run": defaultDeployTestData,
+				"stage": {
+					spaceName:          "mySpace",
+					appName:            "myApp",
+					envName:            "stage",
+					envNS:              "my-stage",
+					expectVersion:      "1.0.3",
+					expectPodsRunning:  1,
+					expectPodsStopping: 1,
+					expectPodsTotal:    2,
 				},
 			},
+			dcInput:  dcInput,
+			rcInput:  rcInput,
+			podInput: podInput,
 		},
 	}
 
@@ -747,7 +816,10 @@ func TestGetApplication(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, testCase := range testCases {
-		kubeGetter.appInput = testCase
+		kubeGetter.dcInput = testCase.dcInput
+		kubeGetter.rcInput = testCase.rcInput
+		kubeGetter.podInput = testCase.podInput
+
 		app, err := kc.GetApplication(testCase.spaceName, testCase.appName)
 		if testCase.shouldFail {
 			assert.Error(t, err)
@@ -764,10 +836,16 @@ func TestGetDeployment(t *testing.T) {
 	testCases := []*deployTestData{
 		defaultDeployTestData,
 		{
-			spaceName:  "mySpace",
-			appName:    "myApp",
-			envName:    "doesNotExist",
-			dcJson:     defaultDeploymentConfig,
+			spaceName: "mySpace",
+			appName:   "myApp",
+			envName:   "doesNotExist",
+			dcInput:   defaultDeploymentConfigInput,
+			rcInput: map[string]*replicationControllerInput{
+				"my-run": defaultReplicationControllerInput,
+			},
+			podInput: map[string]*podInput{
+				"my-run": defaultPodInput,
+			},
 			shouldFail: true,
 		},
 	}
@@ -775,18 +853,21 @@ func TestGetDeployment(t *testing.T) {
 	kubeGetter := &testGetter{}
 	metricsGetter := &testMetricsGetter{}
 	config := &kubernetesV1.KubeClientConfig{
-		ClusterURL:        "http://api.myCluster",
-		BearerToken:       "myToken",
-		UserNamespace:     "myNamespace",
-		KubeRESTAPIGetter: kubeGetter,
-		MetricsGetter:     metricsGetter,
+		ClusterURL:             "http://api.myCluster",
+		BearerToken:            "myToken",
+		UserNamespace:          "myNamespace",
+		KubeRESTAPIGetter:      kubeGetter,
+		MetricsGetter:          metricsGetter,
+		OpenShiftRESTAPIGetter: kubeGetter,
 	}
 
 	kc, err := kubernetesV1.NewKubeClient(config)
 	require.NoError(t, err)
 
 	for _, testCase := range testCases {
-		kubeGetter.depInput = testCase
+		kubeGetter.dcInput = testCase.dcInput
+		kubeGetter.rcInput = testCase.rcInput
+		kubeGetter.podInput = testCase.podInput
 
 		dep, err := kc.GetDeployment(testCase.spaceName, testCase.appName, testCase.envName)
 		if testCase.shouldFail {
@@ -812,21 +893,12 @@ func verifyApplication(app *app.SimpleApp, testCase *appTestData, t *testing.T) 
 	}
 	for _, dep := range app.Pipeline {
 		var depInput *deployTestData
-		fmt.Printf("%v %v %v\n", *dep.Name, *dep.Version, *dep.Pods)
 		if dep != nil && dep.Name != nil {
-			depInput = findMatchingDeploymentInput(*dep.Name, testCase.deployInput)
+			depInput = testCase.deployInput[*dep.Name]
+			require.NotNil(t, depInput, "Unknown env: "+*dep.Name)
 		}
 		verifyDeployment(dep, depInput, t)
 	}
-}
-
-func findMatchingDeploymentInput(envName string, inputs map[string]*deployTestData) *deployTestData {
-	for _, input := range inputs {
-		if input.envName == envName {
-			return input
-		}
-	}
-	return nil
 }
 
 func verifyDeployment(dep *app.SimpleDeployment, testCase *deployTestData, t *testing.T) {
@@ -841,9 +913,9 @@ func verifyDeployment(dep *app.SimpleDeployment, testCase *deployTestData, t *te
 	}
 	// TODO use assert.ElementsMatch when moving to new pod status format
 	if assert.NotNil(t, dep.Pods, "Pods are nil") {
-		assert.Equal(t, testCase.podInput.expectRunning, *dep.Pods.Running, "Wrong number of running pods")
-		assert.Equal(t, testCase.podInput.expectStarting, *dep.Pods.Starting, "Wrong number of starting pods")
-		assert.Equal(t, testCase.podInput.expectStopping, *dep.Pods.Stopping, "Wrong number of stopping pods")
-		assert.Equal(t, testCase.podInput.expectTotal, *dep.Pods.Total, "Wrong number of total pods")
+		assert.Equal(t, testCase.expectPodsRunning, *dep.Pods.Running, "Wrong number of running pods")
+		assert.Equal(t, testCase.expectPodsStarting, *dep.Pods.Starting, "Wrong number of starting pods")
+		assert.Equal(t, testCase.expectPodsStopping, *dep.Pods.Stopping, "Wrong number of stopping pods")
+		assert.Equal(t, testCase.expectPodsTotal, *dep.Pods.Total, "Wrong number of total pods")
 	}
 }
