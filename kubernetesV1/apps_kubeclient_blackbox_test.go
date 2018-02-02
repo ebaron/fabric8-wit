@@ -34,14 +34,15 @@ type testKube struct {
 }
 
 type testGetter struct { // TODO maybe rename to testFixture
-	cmInput  *configMapInput
-	rqInput  *resourceQuotaInput
-	rcInput  map[string]*replicationControllerInput // TODO these can just be strings
-	podInput map[string]*podInput
-	bcInput  string
-	dcInput  deploymentConfigInput
-	result   *testKube
-	os       *testOpenShift
+	cmInput    *configMapInput
+	rqInput    *resourceQuotaInput
+	rcInput    map[string]*replicationControllerInput // TODO these can just be strings
+	podInput   map[string]*podInput
+	bcInput    string
+	dcInput    deploymentConfigInput
+	scaleInput deploymentConfigInput
+	result     *testKube
+	os         *testOpenShift
 }
 
 type deploymentConfigInput map[string]map[string]string
@@ -49,6 +50,12 @@ type deploymentConfigInput map[string]map[string]string
 var defaultDeploymentConfigInput = deploymentConfigInput{
 	"myApp": {
 		"my-run": "deploymentconfig-one.json",
+	},
+}
+
+var defaultDeploymentScaleInput = deploymentConfigInput{
+	"myApp": {
+		"my-run": "deployment-scale.json",
 	},
 }
 
@@ -530,7 +537,8 @@ func TestGetEnvironment(t *testing.T) {
 }
 
 type testOpenShift struct {
-	getter *testGetter
+	getter     *testGetter
+	scaleOuput map[string]interface{}
 }
 
 type spaceTestData struct {
@@ -620,6 +628,7 @@ func (getter *testGetter) GetOpenShiftRESTAPI(config *kubernetesV1.KubeClientCon
 	oapi := &testOpenShift{
 		getter: getter,
 	}
+	getter.os = oapi
 	return oapi, nil
 }
 
@@ -646,11 +655,19 @@ func (to *testOpenShift) GetDeploymentConfig(namespace string, name string) (map
 }
 
 func (to *testOpenShift) GetDeploymentConfigScale(namespace string, name string) (map[string]interface{}, error) {
-	return nil, nil // TODO
+	input := to.getter.scaleInput.getInput(name, namespace)
+	if input == nil {
+		// No matching DC scale
+		return nil, nil
+	}
+	var result map[string]interface{}
+	err := readJSON(*input, &result)
+	return result, err
 }
 
 func (to *testOpenShift) SetDeploymentConfigScale(namespace string, name string, scale map[string]interface{}) error {
-	return nil // TODO
+	to.scaleOuput = scale // TODO also check NS and name
+	return nil
 }
 
 func readJSON(filename string, dest interface{}) error {
@@ -877,6 +894,78 @@ func TestGetDeployment(t *testing.T) {
 				continue
 			}
 			verifyDeployment(dep, testCase, t)
+		}
+	}
+}
+
+func TestScaleDeployment(t *testing.T) {
+	testCases := []struct {
+		spaceName   string
+		appName     string
+		envName     string
+		dcInput     deploymentConfigInput
+		scaleInput  deploymentConfigInput
+		newReplicas int
+		oldReplicas int
+		shouldFail  bool
+	}{
+		{
+			spaceName:   "mySpace",
+			appName:     "myApp",
+			envName:     "run",
+			dcInput:     defaultDeploymentConfigInput,
+			scaleInput:  defaultDeploymentScaleInput,
+			newReplicas: 3,
+			oldReplicas: 2,
+		},
+		{
+			spaceName: "mySpace",
+			appName:   "myApp",
+			envName:   "run",
+			dcInput:   defaultDeploymentConfigInput,
+			scaleInput: deploymentConfigInput{
+				"myApp": {
+					"my-run": "deployment-scale-zero.json",
+				},
+			},
+			newReplicas: 1,
+			oldReplicas: 0,
+		},
+	}
+
+	kubeGetter := &testGetter{}
+	metricsGetter := &testMetricsGetter{}
+	config := &kubernetes.KubeClientConfig{
+		ClusterURL:             "http://api.myCluster",
+		BearerToken:            "myToken",
+		UserNamespace:          "myNamespace",
+		KubeRESTAPIGetter:      kubeGetter,
+		MetricsGetter:          metricsGetter,
+		OpenShiftRESTAPIGetter: kubeGetter,
+	}
+
+	kc, err := kubernetes.NewKubeClient(config)
+	require.NoError(t, err)
+
+	for _, testCase := range testCases {
+		kubeGetter.dcInput = testCase.dcInput
+		kubeGetter.scaleInput = testCase.scaleInput
+
+		old, err := kc.ScaleDeployment(testCase.spaceName, testCase.appName, testCase.envName, testCase.newReplicas)
+		if testCase.shouldFail {
+			assert.Error(t, err)
+		} else {
+			if !assert.NoError(t, err) {
+				continue
+			}
+			assert.NotNil(t, old, "Previous replicas are nil")
+			assert.Equal(t, testCase.oldReplicas, *old, "Wrong number of previous replicas")
+			// Check spec/replicas modified correctly
+			spec, ok := kubeGetter.os.scaleOuput["spec"].(map[string]interface{})
+			assert.True(t, ok, "Spec property is missing or invalid")
+			newReplicas, ok := spec["replicas"].(int)
+			assert.True(t, ok, "Replicas property is missing or invalid")
+			assert.Equal(t, testCase.newReplicas, newReplicas, "Wrong modified number of replicas")
 		}
 	}
 }

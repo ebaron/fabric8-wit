@@ -258,10 +258,11 @@ func (kc *kubeClient) ScaleDeployment(spaceName string, appName string, envName 
 	replicas, pres := spec["replicas"]
 	oldReplicas := 0 // replicas property may be missing from spec if set to 0
 	if pres {
-		oldReplicas, ok = replicas.(int)
+		oldReplicasFlt, ok := replicas.(float64)
 		if !ok {
 			return nil, errors.New("Invalid deployment config returned from endpoint: 'replicas' is not an integer")
 		}
+		oldReplicas = int(oldReplicasFlt)
 	}
 	spec["replicas"] = deployNumber
 
