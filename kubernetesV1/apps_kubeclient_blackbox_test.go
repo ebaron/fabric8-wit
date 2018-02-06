@@ -814,7 +814,7 @@ func TestGetSpace(t *testing.T) {
 		},
 		defaultSpaceTestData,
 		{
-			name:   "mySpace",
+			name:   "mySpace", // Test two BCs, but only one DC
 			bcJson: "buildconfigs-two.json",
 			appInput: map[string]*appTestData{
 				"myApp": defaultAppTestData,
@@ -826,7 +826,70 @@ func TestGetSpace(t *testing.T) {
 			dcInput:  defaultDeploymentConfigInput,
 			rcInput:  defaultReplicationControllerInput,
 			podInput: defaultPodInput,
-		}, // TODO test >1 apps with >1 deployments
+		},
+		{
+			name:   "mySpace", // Test two deployed applications, with two environments
+			bcJson: "buildconfigs-two.json",
+			appInput: map[string]*appTestData{
+				"myApp": &appTestData{
+					spaceName: "mySpace",
+					appName:   "myApp",
+					deployInput: map[string]*deployTestData{
+						"run": {
+							spaceName:         "mySpace",
+							appName:           "myApp",
+							envName:           "run",
+							envNS:             "my-run",
+							expectVersion:     "1.0.2",
+							expectPodsRunning: 2,
+							expectPodsTotal:   2,
+						},
+						"stage": {
+							spaceName:          "mySpace",
+							appName:            "myApp",
+							envName:            "stage",
+							envNS:              "my-stage",
+							expectVersion:      "1.0.3",
+							expectPodsRunning:  1,
+							expectPodsStopping: 1,
+							expectPodsTotal:    2,
+						},
+					},
+				},
+				"myOtherApp": &appTestData{
+					spaceName: "mySpace",
+					appName:   "myOtherApp",
+					deployInput: map[string]*deployTestData{
+						"run": {
+							spaceName:         "mySpace",
+							appName:           "myOtherApp",
+							envName:           "run",
+							envNS:             "my-run",
+							expectVersion:     "1.0.1",
+							expectPodsRunning: 1,
+							expectPodsTotal:   1,
+						},
+					},
+				},
+			},
+			dcInput: deploymentConfigInput{
+				"myApp": {
+					"my-run":   "deploymentconfig-one.json",
+					"my-stage": "deploymentconfig-one-stage.json",
+				},
+				"myOtherApp": {
+					"my-run": "deploymentconfig-other.json",
+				},
+			},
+			rcInput: map[string]string{
+				"my-run":   "replicationcontroller-two.json",
+				"my-stage": "replicationcontroller.json",
+			},
+			podInput: map[string]string{
+				"my-run":   "pods-two-apps.json",
+				"my-stage": "pods-one-stopped.json",
+			},
+		},
 	}
 
 	fixture := &testFixture{}
@@ -887,7 +950,7 @@ func TestGetApplication(t *testing.T) {
 		"my-stage": "pods-one-stopped.json",
 	}
 	testCases := []*appTestData{
-		defaultAppTestData, // TODO test multiple deployments
+		defaultAppTestData,
 		{
 			spaceName: "mySpace",
 			appName:   "myApp",
@@ -907,6 +970,28 @@ func TestGetApplication(t *testing.T) {
 			dcInput:  dcInput,
 			rcInput:  rcInput,
 			podInput: podInput,
+		},
+		{
+			spaceName: "mySpace", // Test deployment with no pods
+			appName:   "myOtherApp",
+			deployInput: map[string]*deployTestData{
+				"run": {
+					spaceName:     "mySpace",
+					appName:       "myApp",
+					envName:       "run",
+					envNS:         "my-run",
+					expectVersion: "1.0.1",
+				},
+			},
+			dcInput: deploymentConfigInput{
+				"myOtherApp": {
+					"my-run": "deploymentconfig-other.json",
+				},
+			},
+			rcInput: map[string]string{
+				"my-run": "replicationcontroller-two.json",
+			},
+			podInput: defaultPodInput,
 		},
 	}
 
