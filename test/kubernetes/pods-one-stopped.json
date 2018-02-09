@@ -27,7 +27,7 @@
                     "app": "myApp",
                     "deployment": "myApp-1",
                     "deploymentconfig": "myApp",
-                    "group": "com.redhat",
+                    "group": "myGroup",
                     "provider": "fabric8",
                     "space": "myspace",
                     "version": "1.0.3"
@@ -245,7 +245,7 @@
                     "app": "myApp",
                     "deployment": "myApp-1",
                     "deploymentconfig": "myApp",
-                    "group": "com.redhat",
+                    "group": "myGroup",
                     "provider": "fabric8",
                     "space": "myspace",
                     "version": "1.0.3"
