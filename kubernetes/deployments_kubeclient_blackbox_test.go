@@ -11,6 +11,7 @@ import (
 
 	"github.com/fabric8-services/fabric8-wit/app"
 	"github.com/fabric8-services/fabric8-wit/kubernetes"
+	errs "github.com/pkg/errors"
 	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -160,11 +161,11 @@ func (rq *testResourceQuota) Get(name string, options metav1.GetOptions) (*v1.Re
 	}
 	hardQuantity, err := stringToQuantityMap(rq.input.hard)
 	if err != nil {
-		return nil, err
+		return nil, errs.WithStack(err)
 	}
 	usedQuantity, err := stringToQuantityMap(rq.input.used)
 	if err != nil {
-		return nil, err
+		return nil, errs.WithStack(err)
 	}
 	result := &v1.ResourceQuota{
 		ObjectMeta: metav1.ObjectMeta{
@@ -185,7 +186,7 @@ func stringToQuantityMap(input map[v1.ResourceName]float64) (v1.ResourceList, er
 		strVal := strconv.FormatFloat(v, 'f', -1, 64)
 		q, err := resource.ParseQuantity(strVal)
 		if err != nil {
-			return nil, err
+			return nil, errs.WithStack(err)
 		}
 		result[k] = q
 	}
@@ -528,11 +529,11 @@ func readJSON(filename string, dest interface{}) error {
 	path := pathToTestJSON + filename
 	jsonBytes, err := ioutil.ReadFile(path)
 	if err != nil {
-		return err
+		return errs.WithStack(err)
 	}
 	err = json.Unmarshal(jsonBytes, dest)
 	if err != nil {
-		return err
+		return errs.WithStack(err)
 	}
 	return nil
 }
