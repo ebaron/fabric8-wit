@@ -48,6 +48,7 @@ const (
 	varPopulateCommonTypes          = "populate.commontypes"
 	varHTTPAddress                  = "http.address"
 	varMetricsHTTPAddress           = "metrics.http.address"
+	varDiagnoseHTTPAddress          = "diagnose.http.address"
 	varDeveloperModeEnabled         = "developer.mode.enabled"
 	varAuthDomainPrefix             = "auth.domain.prefix"
 	varAuthShortServiceHostName     = "auth.servicehostname.short"
@@ -75,6 +76,7 @@ const (
 	varCacheControlIterations        = "cachecontrol.iterations"
 	varCacheControlAreas             = "cachecontrol.areas"
 	varCacheControlLabels            = "cachecontrol.labels"
+	varCacheControlQueries           = "cachecontrol.queries"
 	varCacheControlComments          = "cachecontrol.comments"
 	varCacheControlFilters           = "cachecontrol.filters"
 	varCacheControlUsers             = "cachecontrol.users"
@@ -90,6 +92,7 @@ const (
 	varCacheControlIteration        = "cachecontrol.iteration"
 	varCacheControlArea             = "cachecontrol.area"
 	varCacheControlLabel            = "cachecontrol.label"
+	varCacheControlQuery            = "cachecontrol.query"
 	varCacheControlComment          = "cachecontrol.comment"
 
 	defaultConfigFile           = "config.yaml"
@@ -333,6 +336,18 @@ func (c *Registry) GetMetricsHTTPAddress() string {
 	return c.v.GetString(varMetricsHTTPAddress)
 }
 
+// GetDiagnoseHTTPAddress returns the address of where to start the gops handler.
+// By default GetDiagnoseHTTPAddress is 127.0.0.1:0 in devMode, but turned off in prod mode
+// unless explicitly configured
+func (c *Registry) GetDiagnoseHTTPAddress() string {
+	if c.v.IsSet(varDiagnoseHTTPAddress) {
+		return c.v.GetString(varDiagnoseHTTPAddress)
+	} else if c.IsPostgresDeveloperModeEnabled() {
+		return "127.0.0.1:0"
+	}
+	return ""
+}
+
 // GetHeaderMaxLength returns the max length of HTTP headers allowed in the system
 // For example it can be used to limit the size of bearer tokens returned by the api service
 func (c *Registry) GetHeaderMaxLength() int64 {
@@ -420,6 +435,18 @@ func (c *Registry) GetCacheControlLabels() string {
 // when returning a label.
 func (c *Registry) GetCacheControlLabel() string {
 	return c.v.GetString(varCacheControlLabel)
+}
+
+// GetCacheControlQueries returns the value to set in the "Cache-Control" HTTP response header
+// when returning a list of queries.
+func (c *Registry) GetCacheControlQueries() string {
+	return c.v.GetString(varCacheControlQueries)
+}
+
+// GetCacheControlQuery returns the value to set in the "Cache-Control" HTTP response header
+// when returning an query.
+func (c *Registry) GetCacheControlQuery() string {
+	return c.v.GetString(varCacheControlQuery)
 }
 
 // GetCacheControlSpaces returns the value to set in the "Cache-Control" HTTP response header

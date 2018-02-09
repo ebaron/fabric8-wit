@@ -22,6 +22,7 @@ import (
 type linkRepoBlackBoxTest struct {
 	gormtestsupport.DBTestSuite
 	workitemLinkRepo *link.GormWorkItemLinkRepository
+	workitemRepo     *workitem.GormWorkItemRepository
 }
 
 func TestRunLinkRepoBlackBoxTest(t *testing.T) {
@@ -32,6 +33,7 @@ func TestRunLinkRepoBlackBoxTest(t *testing.T) {
 func (s *linkRepoBlackBoxTest) SetupTest() {
 	s.DBTestSuite.SetupTest()
 	s.workitemLinkRepo = link.NewWorkItemLinkRepository(s.DB)
+	s.workitemRepo = workitem.NewWorkItemRepository(s.DB)
 }
 
 func (s *linkRepoBlackBoxTest) TestList() {
@@ -58,6 +60,220 @@ func (s *linkRepoBlackBoxTest) TestList() {
 		require.NoError(t, err)
 		require.Len(t, res, 1)
 		require.Equal(t, 3, int(count))
+	})
+}
+
+// Tests reorder of child work item **above**
+func (s *linkRepoBlackBoxTest) TestChildReorderAbove() {
+	s.T().Run("ok - child work item reorder above", func(t *testing.T) {
+		// Create 3 workitems -> Parent, Child 1 & 2
+		// Workitems in ascending order =
+		// Parent (1000)
+		// Child1 (2000)
+		// Child2 (3000)
+		fxt := tf.NewTestFixture(t, s.DB,
+			tf.Identities(1),
+			tf.Spaces(1),
+			tf.WorkItems(3),
+			tf.WorkItemLinkTypes(1, func(fxt *tf.TestFixture, idx int) error {
+				fxt.WorkItemLinkTypes[idx].ForwardName = "parent of"
+				return nil
+			}),
+			tf.WorkItemLinks(2, func(fxt *tf.TestFixture, idx int) error {
+				fxt.WorkItemLinks[idx].SourceID = fxt.WorkItems[0].ID
+				fxt.WorkItemLinks[idx].TargetID = fxt.WorkItems[idx+1].ID
+				return nil
+			}),
+		)
+
+		// List all children before reordering.
+		// List returns workitems in descending order.
+		// So, beforeReorder returns
+		// Child2 (3000)
+		// Child1 (2000)
+		beforeReorder, _, err := s.workitemLinkRepo.ListWorkItemChildren(s.Ctx, fxt.WorkItems[0].ID, nil, nil)
+		require.NoError(t, err)
+		require.Len(t, beforeReorder, 2)
+
+		// Reorder child1 above child2
+		_, err = s.workitemRepo.Reorder(s.Ctx, fxt.Spaces[0].ID, workitem.DirectionAbove, &fxt.WorkItems[2].ID, *fxt.WorkItems[1], fxt.Identities[0].ID)
+		require.NoError(t, err)
+
+		// List all workitem children after reordering. Again, List returns workitems in descending order
+		// afterReorder returns
+		// Child1 (3500)
+		// Child2 (3000)
+		afterReorder, _, err := s.workitemLinkRepo.ListWorkItemChildren(s.Ctx, fxt.WorkItems[0].ID, nil, nil)
+		require.NoError(t, err)
+		require.Len(t, afterReorder, 2)
+
+		var expectedOrder []interface{}
+		for i := 1; i < 3; i++ {
+			expectedOrder = append(expectedOrder, fxt.WorkItems[i].ID) // expectedOrder = [child1, child2]
+		}
+		for i, v := range afterReorder {
+			assert.Equal(t, v.ID, expectedOrder[i])
+		}
+	})
+}
+
+// Tests reorder of child work item **below**
+func (s *linkRepoBlackBoxTest) TestChildReorderBelow() {
+	s.T().Run("ok - child work item reorder below", func(t *testing.T) {
+		// Create 3 workitems -> Parent, Child 1 & 2
+		// Workitems in ascending order =
+		// Parent (1000)
+		// Child1 (2000)
+		// Child2 (3000)
+		fxt := tf.NewTestFixture(t, s.DB,
+			tf.Identities(1),
+			tf.Spaces(1),
+			tf.WorkItems(3),
+			tf.WorkItemLinkTypes(1, func(fxt *tf.TestFixture, idx int) error {
+				fxt.WorkItemLinkTypes[idx].ForwardName = "parent of"
+				return nil
+			}),
+			tf.WorkItemLinks(2, func(fxt *tf.TestFixture, idx int) error {
+				fxt.WorkItemLinks[idx].SourceID = fxt.WorkItems[0].ID
+				fxt.WorkItemLinks[idx].TargetID = fxt.WorkItems[idx+1].ID
+				return nil
+			}),
+		)
+
+		// List all children before reordering.
+		// List returns workitems in descending order.
+		// So, beforeReorder returns
+		// Child2 (3000)
+		// Child1 (2000)
+		beforeReorder, _, err := s.workitemLinkRepo.ListWorkItemChildren(s.Ctx, fxt.WorkItems[0].ID, nil, nil)
+		require.NoError(t, err)
+		require.Len(t, beforeReorder, 2)
+
+		// Reorder child2 below child1
+		_, err = s.workitemRepo.Reorder(s.Ctx, fxt.Spaces[0].ID, workitem.DirectionBelow, &fxt.WorkItems[1].ID, *fxt.WorkItems[2], fxt.Identities[0].ID)
+		require.NoError(t, err)
+
+		// List all workitem children after reordering. Again, List returns workitems in descending order
+		// afterReorder returns
+		// Child1 (2000)
+		// Child2 (1500)
+		afterReorder, _, err := s.workitemLinkRepo.ListWorkItemChildren(s.Ctx, fxt.WorkItems[0].ID, nil, nil)
+		require.NoError(t, err)
+		require.Len(t, afterReorder, 2)
+
+		var expectedOrder []interface{}
+		for i := 1; i < 3; i++ {
+			expectedOrder = append(expectedOrder, fxt.WorkItems[i].ID) // expectedOrder = [child1, child2]
+		}
+		for i, v := range afterReorder {
+			assert.Equal(t, v.ID, expectedOrder[i])
+		}
+	})
+}
+
+// Tests reorder of child work item **top**
+func (s *linkRepoBlackBoxTest) TestChildrenReorderTop() {
+	s.T().Run("ok - child work items reorder top", func(t *testing.T) {
+		// Create 3 workitems -> Parent, Child 1 & 2
+		// Workitems in ascending order =
+		// Parent (1000)
+		// Child1 (2000)
+		// Child2 (3000)
+		fxt := tf.NewTestFixture(t, s.DB,
+			tf.Identities(1),
+			tf.Spaces(1),
+			tf.WorkItems(3),
+			tf.WorkItemLinkTypes(1, func(fxt *tf.TestFixture, idx int) error {
+				fxt.WorkItemLinkTypes[idx].ForwardName = "parent of"
+				return nil
+			}),
+			tf.WorkItemLinks(2, func(fxt *tf.TestFixture, idx int) error {
+				fxt.WorkItemLinks[idx].SourceID = fxt.WorkItems[0].ID
+				fxt.WorkItemLinks[idx].TargetID = fxt.WorkItems[idx+1].ID
+				return nil
+			}),
+		)
+
+		// List all children before reordering.
+		// List returns workitems in descending order.
+		// So, beforeReorder returns
+		// Child2 (3000)
+		// Child1 (2000)
+		beforeReorder, _, err := s.workitemLinkRepo.ListWorkItemChildren(s.Ctx, fxt.WorkItems[0].ID, nil, nil)
+		require.NoError(t, err)
+		require.Len(t, beforeReorder, 2)
+
+		// Reorder child 1 to topmost position
+		s.workitemRepo.Reorder(s.Ctx, fxt.Spaces[0].ID, workitem.DirectionTop, nil, *fxt.WorkItems[1], fxt.Identities[0].ID)
+
+		// List all workitem children after reordering. Again, List returns workitems in descending order
+		// afterReorder returns
+		// Child1 (4000)
+		// Child2 (3000)
+		afterReorder, _, err := s.workitemLinkRepo.ListWorkItemChildren(s.Ctx, fxt.WorkItems[0].ID, nil, nil)
+		require.NoError(t, err)
+		require.Len(t, afterReorder, 2)
+
+		var expectedOrder []interface{}
+		for i := 1; i < 3; i++ {
+			expectedOrder = append(expectedOrder, fxt.WorkItems[i].ID) // expectedOrder = [child1, child2]
+		}
+		for i, v := range afterReorder {
+			assert.Equal(t, v.ID, expectedOrder[i])
+		}
+	})
+}
+
+// Tests reorder of child work item **bottom**
+func (s *linkRepoBlackBoxTest) TestChildrenReorderBottom() {
+	s.T().Run("ok - child work items reorder bottom", func(t *testing.T) {
+		// Create 3 workitems -> Parent, Child 1 & 2
+		// Workitems in ascending order =
+		// Parent (1000)
+		// Child1 (2000)
+		// Child2 (3000)
+		fxt := tf.NewTestFixture(t, s.DB,
+			tf.Identities(1),
+			tf.Spaces(1),
+			tf.WorkItems(3),
+			tf.WorkItemLinkTypes(1, func(fxt *tf.TestFixture, idx int) error {
+				fxt.WorkItemLinkTypes[idx].ForwardName = "parent of"
+				return nil
+			}),
+			tf.WorkItemLinks(2, func(fxt *tf.TestFixture, idx int) error {
+				fxt.WorkItemLinks[idx].SourceID = fxt.WorkItems[0].ID
+				fxt.WorkItemLinks[idx].TargetID = fxt.WorkItems[idx+1].ID
+				return nil
+			}),
+		)
+
+		// List all children before reordering.
+		// List returns workitems in descending order.
+		// So, beforeReorder returns
+		// Child2 (3000)
+		// Child1 (2000)
+		beforeReorder, _, err := s.workitemLinkRepo.ListWorkItemChildren(s.Ctx, fxt.WorkItems[0].ID, nil, nil)
+		require.NoError(t, err)
+		require.Len(t, beforeReorder, 2)
+
+		// Reorder child 2 to bottom most position
+		s.workitemRepo.Reorder(s.Ctx, fxt.Spaces[0].ID, workitem.DirectionBottom, nil, *fxt.WorkItems[2], fxt.Identities[0].ID)
+
+		// List all workitem children after reordering. Again, List returns workitems in descending order
+		// afterReorder returns
+		// Child1 (2000)
+		// Child2 (500)
+		afterReorder, _, err := s.workitemLinkRepo.ListWorkItemChildren(s.Ctx, fxt.WorkItems[0].ID, nil, nil)
+		require.NoError(t, err)
+		require.Len(t, afterReorder, 2)
+
+		var expectedOrder []interface{}
+		for i := 1; i < 3; i++ {
+			expectedOrder = append(expectedOrder, fxt.WorkItems[i].ID) // expectedOrder = [child1, child2]
+		}
+		for i, v := range afterReorder {
+			assert.Equal(t, v.ID, expectedOrder[i])
+		}
 	})
 }
 
@@ -498,37 +714,15 @@ func (s *linkRepoBlackBoxTest) TestExistsLink() {
 	})
 }
 
-func (s *linkRepoBlackBoxTest) TestGetParentID() {
-	// create 1 links between 2 work items having TopologyNetwork with ForwardName = "parent of"
-	fixtures := tf.NewTestFixture(s.T(), s.DB, tf.WorkItemLinks(1), tf.WorkItemLinkTypes(1, tf.SetTopologies(link.TopologyTree), func(fxt *tf.TestFixture, idx int) error {
-		fxt.WorkItemLinkTypes[idx].ForwardName = "parent of"
-		return nil
-	}))
-	parentID, err := s.workitemLinkRepo.GetParentID(s.Ctx, fixtures.WorkItems[1].ID)
-	require.NoError(s.T(), err)
-	assert.Equal(s.T(), fixtures.WorkItems[0].ID, *parentID)
-}
-
-func (s *linkRepoBlackBoxTest) TestGetParentIDNotExist() {
-	// create 1 links between 2 work items having TopologyNetwork with ForwardName = "parent of"
-	fixtures := tf.NewTestFixture(s.T(), s.DB, tf.WorkItemLinks(1), tf.WorkItemLinkTypes(1, tf.SetTopologies(link.TopologyTree), func(fxt *tf.TestFixture, idx int) error {
-		fxt.WorkItemLinkTypes[idx].ForwardName = "parent of"
-		return nil
-	}))
-	parentID, err := s.workitemLinkRepo.GetParentID(s.Ctx, fixtures.WorkItems[0].ID)
-	require.Error(s.T(), err)
-	assert.Nil(s.T(), parentID)
-}
-
 func (s *linkRepoBlackBoxTest) TestGetAncestors() {
 	validateAncestry := func(t *testing.T, fxt *tf.TestFixture, toBeFound map[link.Ancestor]struct{}, ancestors []link.Ancestor) {
 		// uncomment for more information:
 		// for _, ancestor := range ancestors {
-		// t.Logf("Ancestor: %s For: %s IsRoot: %t\n",
-		// fxt.WorkItemByID(ancestor.ID).Fields[workitem.SystemTitle].(string),
-		// fxt.WorkItemByID(ancestor.OriginalChildID).Fields[workitem.SystemTitle].(string),
-		// ancestor.IsRoot,
-		// )
+		// 	t.Logf("Ancestor: %s For: %s IsRoot: %t\n",
+		// 		fxt.WorkItemByID(ancestor.ID).Fields[workitem.SystemTitle].(string),
+		// 		fxt.WorkItemByID(ancestor.OriginalChildID).Fields[workitem.SystemTitle].(string),
+		// 		ancestor.IsRoot,
+		// 	)
 		// }
 
 		for _, ancestor := range ancestors {
@@ -543,10 +737,10 @@ func (s *linkRepoBlackBoxTest) TestGetAncestors() {
 			require.True(t, ok, "found unexpected ancestor: %s", fxt.WorkItemByID(ancestor.ID).Fields[workitem.SystemTitle].(string))
 			delete(toBeFound, ancestor)
 		}
-		require.Empty(t, toBeFound, "failed to find these ancestors in list: %s", func() string {
+		require.Empty(t, toBeFound, "failed to find these expected ancestors: %s", func() string {
 			titles := []string{}
 			for ancestor := range toBeFound {
-				titles = append(titles, "\""+fxt.WorkItemByID(ancestor.ID).Fields[workitem.SystemTitle].(string)+"\"")
+				titles = append(titles, fmt.Sprintf("\"%s\" (%s)", fxt.WorkItemByID(ancestor.ID).Fields[workitem.SystemTitle].(string), ancestor.ID))
 			}
 			return strings.Join(titles, ", ")
 		}())
@@ -571,19 +765,19 @@ func (s *linkRepoBlackBoxTest) TestGetAncestors() {
 				E := fxt.WorkItemByTitle("E").ID
 
 				t.Run("ancestors for E (none expected)", func(t *testing.T) {
-					ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, E)
+					ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, link.AncestorLevelAll, E)
 					require.NoError(t, err)
 					validateAncestry(t, fxt, nil, ancestors)
 				})
 
 				t.Run("ancestors for A (none expected)", func(t *testing.T) {
-					ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, A)
+					ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, link.AncestorLevelAll, A)
 					require.NoError(t, err)
 					validateAncestry(t, fxt, nil, ancestors)
 				})
 
 				t.Run("ancestors for D (expecting A,B,C)", func(t *testing.T) {
-					ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, D)
+					ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, link.AncestorLevelAll, D)
 					require.NoError(t, err)
 					validateAncestry(t, fxt, map[link.Ancestor]struct{}{
 						{ID: A, DirectChildID: B, Level: 3, OriginalChildID: D, IsRoot: true}:  {},
@@ -593,7 +787,7 @@ func (s *linkRepoBlackBoxTest) TestGetAncestors() {
 				})
 
 				t.Run("ancestors for C (expecting A,B)", func(t *testing.T) {
-					ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, C)
+					ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, link.AncestorLevelAll, C)
 					require.NoError(t, err)
 					validateAncestry(t, fxt, map[link.Ancestor]struct{}{
 						{ID: A, DirectChildID: B, Level: 2, OriginalChildID: C, IsRoot: true}:  {},
@@ -602,7 +796,7 @@ func (s *linkRepoBlackBoxTest) TestGetAncestors() {
 				})
 
 				t.Run("ancestors for D, and C (expecting, A,B,C and A,B)", func(t *testing.T) {
-					ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, D, C)
+					ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, link.AncestorLevelAll, D, C)
 					require.NoError(t, err)
 					validateAncestry(t, fxt, map[link.Ancestor]struct{}{
 						// for D
@@ -615,6 +809,38 @@ func (s *linkRepoBlackBoxTest) TestGetAncestors() {
 					}, ancestors)
 				})
 
+				t.Run("E up to parent (none expected)", func(t *testing.T) {
+					ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, link.AncestorLevelParent, E)
+					require.NoError(t, err)
+					validateAncestry(t, fxt, nil, ancestors)
+				})
+				t.Run("C up to parent (expecting B)", func(t *testing.T) {
+					ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, link.AncestorLevelParent, C)
+					require.NoError(t, err)
+					validateAncestry(t, fxt, map[link.Ancestor]struct{}{
+						// for C
+						{ID: B, DirectChildID: C, Level: 1, OriginalChildID: C, IsRoot: false}: {},
+					}, ancestors)
+				})
+				t.Run("C up to grandparent (expecting A,B)", func(t *testing.T) {
+					ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, link.AncestorLevelGrandParent, C)
+					require.NoError(t, err)
+					validateAncestry(t, fxt, map[link.Ancestor]struct{}{
+						// for C
+						{ID: A, DirectChildID: B, Level: 2, OriginalChildID: C, IsRoot: true}:  {},
+						{ID: B, DirectChildID: C, Level: 1, OriginalChildID: C, IsRoot: false}: {},
+					}, ancestors)
+				})
+				t.Run("D up to great-grandparent (expecting A,B,C)", func(t *testing.T) {
+					ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, link.AncestorLevelGreatGrandParent, D)
+					require.NoError(t, err)
+					validateAncestry(t, fxt, map[link.Ancestor]struct{}{
+						// for D
+						{ID: A, DirectChildID: B, Level: 3, OriginalChildID: D, IsRoot: true}:  {},
+						{ID: B, DirectChildID: C, Level: 2, OriginalChildID: D, IsRoot: false}: {},
+						{ID: C, DirectChildID: D, Level: 1, OriginalChildID: D, IsRoot: false}: {},
+					}, ancestors)
+				})
 			})
 
 			// Two distinct trees:
@@ -647,7 +873,7 @@ func (s *linkRepoBlackBoxTest) TestGetAncestors() {
 				Y := fxt.WorkItemByTitle("Y").ID
 
 				t.Run("ancestors for Y and E (expecting X and A,D)", func(t *testing.T) {
-					ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, Y, E)
+					ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, link.AncestorLevelAll, Y, E)
 					require.NoError(t, err)
 					validateAncestry(t, fxt, map[link.Ancestor]struct{}{
 						// for Y
@@ -679,38 +905,9 @@ func (s *linkRepoBlackBoxTest) TestAncestorList() {
 		E := fxt.WorkItemByTitle("E").ID
 
 		// given
-		ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, E)
+		ancestors, err := s.workitemLinkRepo.GetAncestors(s.Ctx, fxt.WorkItemLinkTypes[0].ID, link.AncestorLevelAll, E)
 		require.NoError(t, err)
 
-		t.Run("GetAncestorOf", func(t *testing.T) {
-			t.Run("parent", func(t *testing.T) {
-				a := ancestors.GetAncestorOf(E, 1)
-				require.NotNil(t, a)
-				require.Equal(t, D, a.ID)
-			})
-			t.Run("grandparent", func(t *testing.T) {
-				a := ancestors.GetAncestorOf(E, 2)
-				require.NotNil(t, a)
-				require.Equal(t, C, a.ID)
-			})
-			t.Run("great-grandparent", func(t *testing.T) {
-				a := ancestors.GetAncestorOf(E, 3)
-				require.NotNil(t, a)
-				require.Equal(t, B, a.ID)
-			})
-			t.Run("level=100", func(t *testing.T) {
-				a := ancestors.GetAncestorOf(E, 100)
-				require.Nil(t, a)
-			})
-			t.Run("level<0", func(t *testing.T) {
-				a := ancestors.GetAncestorOf(E, -1)
-				require.Nil(t, a)
-			})
-			t.Run("level==0", func(t *testing.T) {
-				a := ancestors.GetAncestorOf(E, 0)
-				require.Nil(t, a)
-			})
-		})
 		t.Run("GetParentOf", func(t *testing.T) {
 			t.Run("A", func(t *testing.T) {
 				a := ancestors.GetParentOf(A)
@@ -721,52 +918,46 @@ func (s *linkRepoBlackBoxTest) TestAncestorList() {
 				require.NotNil(t, a)
 				require.Equal(t, D, a.ID)
 			})
+			t.Run("C", func(t *testing.T) {
+				a := ancestors.GetParentOf(C)
+				require.NotNil(t, a)
+				require.Equal(t, B, a.ID)
+			})
 		})
 	})
 }
 
-func TestIDSliceDiff(t *testing.T) {
-	a := []uuid.UUID{
-		// shared with b
-		uuid.FromStringOrNil("9afc7d5c-9f4e-4a04-8359-71d72e5eed94"),
-		uuid.FromStringOrNil("4ce8076c-4997-4565-8272-9a3cb4d7a1a8"),
-		// unique
-		uuid.FromStringOrNil("0403d2cb-02d9-466f-88cd-65dc9247f809"),
-		uuid.FromStringOrNil("0b5159b5-c21b-40c2-af90-f020d71a8e94"),
-	}
-	b := []uuid.UUID{
-		// shared with a
-		uuid.FromStringOrNil("9afc7d5c-9f4e-4a04-8359-71d72e5eed94"),
-		uuid.FromStringOrNil("4ce8076c-4997-4565-8272-9a3cb4d7a1a8"),
-		// unique to b
-		uuid.FromStringOrNil("03a9a225-e7b0-4229-b698-716308f2136a"),
-		uuid.FromStringOrNil("1db1c165-2360-4efc-89b4-e4d3d4988091"),
-		uuid.FromStringOrNil("2fc09162-bf2f-4a1c-b622-323d8495ac58"),
-	}
-	t.Run("equal", func(t *testing.T) {
-		require.Equal(t, []uuid.UUID{}, link.IDSliceDiff(a, a))
-	})
-	t.Run("difference", func(t *testing.T) {
-		toBeFound := map[uuid.UUID]struct{}{
-			// unique to a
-			uuid.FromStringOrNil("0403d2cb-02d9-466f-88cd-65dc9247f809"): {},
-			uuid.FromStringOrNil("0b5159b5-c21b-40c2-af90-f020d71a8e94"): {},
-			// unique to b
-			uuid.FromStringOrNil("03a9a225-e7b0-4229-b698-716308f2136a"): {},
-			uuid.FromStringOrNil("1db1c165-2360-4efc-89b4-e4d3d4988091"): {},
-			uuid.FromStringOrNil("2fc09162-bf2f-4a1c-b622-323d8495ac58"): {},
-		}
-		// when
-		diff := link.IDSliceDiff(a, b)
-		t.Logf("diff: %s", diff)
-		// then
-		for _, id := range diff {
-			_, ok := toBeFound[id]
-			require.True(t, ok, "failed to find %s in expected difference: %s", id, toBeFound)
-			delete(toBeFound, id)
-		}
-		require.Empty(t, toBeFound, "found not all IDs in difference: %+v", toBeFound)
-	})
+func (s *linkRepoBlackBoxTest) TestListChildLinks() {
+	resetFn := s.DisableGormCallbacks()
+	defer resetFn()
 
-	_, _ = a, b
+	s.T().Run("ok", func(t *testing.T) {
+		// given
+		fxt := tf.NewTestFixture(t, s.DB,
+			tf.WorkItems(4, tf.SetWorkItemTitles("A", "B", "C", "D")),
+			tf.WorkItemLinksCustom(3, tf.BuildLinks(tf.L("A", "B"), tf.L("A", "C"), tf.L("C", "D"))),
+		)
+		A := fxt.WorkItemByTitle("A").ID
+		B := fxt.WorkItemByTitle("B").ID
+		C := fxt.WorkItemByTitle("C").ID
+		linkType := fxt.WorkItemLinkTypes[0].ID
+		// when
+		childLinks, err := s.workitemLinkRepo.ListChildLinks(s.Ctx, linkType, A)
+		// then
+		require.NoError(t, err)
+		var foundAB, foundAC bool
+		cnt := 0
+		for _, l := range childLinks {
+			if l.SourceID == A && l.TargetID == B {
+				foundAB = true
+			}
+			if l.SourceID == A && l.TargetID == C {
+				foundAC = true
+			}
+			cnt++
+		}
+		require.Equal(t, 2, cnt)
+		require.True(t, foundAB, "failed to find link A-B")
+		require.True(t, foundAC, "failed to find link A-C")
+	})
 }

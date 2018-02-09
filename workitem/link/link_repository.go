@@ -5,12 +5,12 @@ import (
 	"database/sql"
 	"fmt"
 	"hash/fnv"
-	"strings"
 	"time"
 
 	"github.com/fabric8-services/fabric8-wit/application/repository"
 	"github.com/fabric8-services/fabric8-wit/errors"
 	"github.com/fabric8-services/fabric8-wit/gormsupport"
+	"github.com/fabric8-services/fabric8-wit/id"
 	"github.com/fabric8-services/fabric8-wit/log"
 	"github.com/fabric8-services/fabric8-wit/workitem"
 
@@ -38,11 +38,11 @@ type WorkItemLinkRepository interface {
 	ListByWorkItem(ctx context.Context, wiID uuid.UUID) ([]WorkItemLink, error)
 	DeleteRelatedLinks(ctx context.Context, wiID uuid.UUID, suppressorID uuid.UUID) error
 	Delete(ctx context.Context, ID uuid.UUID, suppressorID uuid.UUID) error
+	ListChildLinks(ctx context.Context, linkTypeID uuid.UUID, parentIDs ...uuid.UUID) (WorkItemLinkList, error)
 	ListWorkItemChildren(ctx context.Context, parentID uuid.UUID, start *int, limit *int) ([]workitem.WorkItem, uint64, error)
 	WorkItemHasChildren(ctx context.Context, parentID uuid.UUID) (bool, error)
-	GetParentID(ctx context.Context, ID uuid.UUID) (*uuid.UUID, error) // GetParentID returns parent ID of the given work item if any
 	// GetAncestors returns all ancestors for the given work items.
-	GetAncestors(ctx context.Context, linkTypeID uuid.UUID, workItemIDs ...uuid.UUID) (ancestors AncestorList, err error)
+	GetAncestors(ctx context.Context, linkTypeID uuid.UUID, upToLevel int64, workItemIDs ...uuid.UUID) (ancestors AncestorList, err error)
 }
 
 // NewWorkItemLinkRepository creates a work item link repository based on gorm
@@ -162,7 +162,7 @@ func (r *GormWorkItemLinkRepository) ValidateTopology(ctx context.Context, sourc
 func (r *GormWorkItemLinkRepository) DetectCycle(ctx context.Context, sourceID, targetID, linkTypeID uuid.UUID) (hasCycle bool, err error) {
 	// Get all roots for link's source.
 	// NOTE(kwk): Yes there can be more than one, if the link type is allowing it.
-	ancestors, err := r.GetAncestors(ctx, linkTypeID, sourceID)
+	ancestors, err := r.GetAncestors(ctx, linkTypeID, AncestorLevelAll, sourceID)
 	if err != nil {
 		log.Error(ctx, map[string]interface{}{
 			"wilt_id":   linkTypeID,
@@ -404,6 +404,22 @@ func (r *GormWorkItemLinkRepository) deleteLink(ctx context.Context, lnk WorkIte
 	return nil
 }
 
+// ListChildLinks gets all links to children for the given parents
+func (r *GormWorkItemLinkRepository) ListChildLinks(ctx context.Context, linkTypeID uuid.UUID, parentIDs ...uuid.UUID) (WorkItemLinkList, error) {
+	defer goa.MeasureSince([]string{"goa", "db", "workitemlink", "list", "children", "ids"}, time.Now())
+
+	var results WorkItemLinkList
+	db := r.db.Model(&WorkItemLink{}).Where("source_id IN (?) AND link_type_id = ?", parentIDs, linkTypeID).Scan(&results)
+	if db.Error != nil {
+		log.Error(ctx, map[string]interface{}{
+			"err": db.Error,
+		}, "failed to find children for work items: %+v", parentIDs)
+		return nil, errors.NewInternalError(ctx, errs.Wrapf(db.Error, "failed to find children for work items: %+v", parentIDs))
+	}
+
+	return results, nil
+}
+
 // ListWorkItemChildren get all child work items
 func (r *GormWorkItemLinkRepository) ListWorkItemChildren(ctx context.Context, parentID uuid.UUID, start *int, limit *int) ([]workitem.WorkItem, uint64, error) {
 	defer goa.MeasureSince([]string{"goa", "db", "workitemlink", "children", "query"}, time.Now())
@@ -427,7 +443,7 @@ func (r *GormWorkItemLinkRepository) ListWorkItemChildren(ctx context.Context, p
 		}
 		db = db.Limit(*limit)
 	}
-	db = db.Select("count(*) over () as cnt2 , *")
+	db = db.Select("count(*) over () as cnt2 , *").Order("execution_order desc")
 
 	rows, err := db.Rows()
 	if err != nil {
@@ -465,8 +481,9 @@ func (r *GormWorkItemLinkRepository) ListWorkItemChildren(ctx context.Context, p
 	}
 
 	if first {
-		// means 0 rows were returned from the first query (maybe becaus of offset outside of total count),
-		// need to do a count(*) to find out total
+		// means 0 rows were returned from the first query (maybe because of
+		// offset outside of total count), need to do a count(*) to find out
+		// total
 		db := db.Select("count(*)")
 		rows2, err := db.Rows()
 		defer rows2.Close()
@@ -523,73 +540,32 @@ func (r *GormWorkItemLinkRepository) WorkItemHasChildren(ctx context.Context, pa
 	return hasChildren, nil
 }
 
-// GetParentID returns parent ID of the given work item if any
-func (r *GormWorkItemLinkRepository) GetParentID(ctx context.Context, ID uuid.UUID) (*uuid.UUID, error) {
-	defer goa.MeasureSince([]string{"goa", "db", "workitemlink", "get", "parent"}, time.Now())
-	query := fmt.Sprintf(`
-			SELECT id FROM %[1]s WHERE id in (
-				SELECT source_id FROM %[2]s
-				WHERE target_id = $1 AND deleted_at IS NULL AND link_type_id IN (
-					SELECT id FROM %[3]s WHERE forward_name = 'parent of' and topology = '%[4]s'
-				)
-			)`,
-		workitem.WorkItemStorage{}.TableName(),
-		WorkItemLink{}.TableName(),
-		WorkItemLinkType{}.TableName(),
-		TopologyTree)
-	var parentID uuid.UUID
-	db := r.db.CommonDB()
-	err := db.QueryRow(query, ID.String()).Scan(&parentID)
-	if err != nil {
-		return nil, errs.Wrapf(err, "parent not found for work item: %s", ID.String(), query)
-	}
-	return &parentID, nil
-}
-
-// IDSliceDiff returns the difference of the given slices.
-func IDSliceDiff(a, b []uuid.UUID) []uuid.UUID {
-	slice := append(a, b...)
-	encountered := map[uuid.UUID]int{}
-	for _, v := range slice {
-		encountered[v] = encountered[v] + 1
-	}
-
-	diff := []uuid.UUID{}
-	for _, v := range slice {
-		if encountered[v] == 1 {
-			diff = append(diff, v)
-		}
-	}
-	return diff
-}
-
-// GetAncestors returns all ancestors for the given work items.
+// GetAncestors returns all ancestors for the given work items based on the
+// given level. Level stands for -1=all, 0=no, 1=up to parent, 2=up to
+// grandparent, 3=up to great-grandparent, and so forth.
 //
 // NOTE: In case the given link type doesn't have a tree topology a work item
 // might have more than one root item. That is why the root IDs is keyed by the
 // the given work item and mapped to an array of root IDs.
-func (r *GormWorkItemLinkRepository) GetAncestors(ctx context.Context, linkTypeID uuid.UUID, workItemIDs ...uuid.UUID) (ancestors AncestorList, err error) {
+func (r *GormWorkItemLinkRepository) GetAncestors(ctx context.Context, linkTypeID uuid.UUID, upToLevel int64, workItemIDs ...uuid.UUID) (ancestors AncestorList, err error) {
 	defer goa.MeasureSince([]string{"goa", "db", "workitemlink", "get", "ancestors"}, time.Now())
 
 	if len(workItemIDs) < 1 {
 		return nil, nil
 	}
-
-	// Get destincts work item IDs (eliminates duplicates)
-	idMap := map[uuid.UUID]struct{}{}
-	for _, id := range workItemIDs {
-		idMap[id] = struct{}{}
+	if upToLevel <= 0 && upToLevel != AncestorLevelAll {
+		return nil, nil
 	}
 
-	// Create a string array of of UUIDs separated by a comma for use in SQL
+	// Create a string array of unique UUIDs separated by a comma for use in SQL
 	// JOIN clause.
-	idArr := make([]string, len(idMap))
-	i := 0
-	for id := range idMap {
-		idArr[i] = "'" + id.String() + "'"
-		i++
+	var idArr id.Slice = workItemIDs
+	idStr := idArr.Unique().ToString(",", func(ID uuid.UUID) string { return fmt.Sprintf("'%s'", ID) })
+
+	levelLimitation := ""
+	if upToLevel != AncestorLevelAll && upToLevel > 0 {
+		levelLimitation = fmt.Sprintf(" AND array_length(already_visited, 1) < %d ", upToLevel)
 	}
-	idStr := strings.Join(idArr, ",")
 
 	// Postgres Common Table Expression (https://www.postgresql.org/docs/current/static/queries-with.html)
 	// TODO(kwk): We should probably measure performance for this.
@@ -631,6 +607,7 @@ func (r *GormWorkItemLinkRepository) GetAncestors(ctx context.Context, linkTypeI
 				AND l.link_type_id = $1
 				AND l.deleted_at IS NULL
 				AND NOT cycle -- recursive termination criteria
+				%[3]s
 		)
 		SELECT
 			ancestor,
@@ -642,6 +619,7 @@ func (r *GormWorkItemLinkRepository) GetAncestors(ctx context.Context, linkTypeI
 		;`,
 		WorkItemLink{}.TableName(),
 		idStr,
+		levelLimitation,
 	)
 
 	// Convert SQL results to instances of ancestor objects

@@ -6,26 +6,57 @@ import (
 
 	"github.com/fabric8-services/fabric8-wit/app"
 	hawkular "github.com/hawkular/hawkular-client-go/metrics"
+	errs "github.com/pkg/errors"
 	v1 "k8s.io/client-go/pkg/api/v1"
 )
 
+// MetricsClientConfig holds configuration data needed to create a new MetricsInterface
+// with kubernetes.NewMetricsClient
+type MetricsClientConfig struct {
+	// URL to the Kubernetes cluster's metrics server
+	MetricsURL string
+	// An authorized token to access the cluster
+	BearerToken string
+	// Provides access to the underlying Hawkular API, uses default implementation if not set
+	HawkularGetter
+}
+
 type metricsClient struct {
-	hawkularClient *hawkular.Client
+	HawkularRESTAPI
 }
 
-// MetricsGetter has a method to access the MetricsInterface interface
-type MetricsGetter interface {
-	GetMetrics(metricsURL string, bearerToken string) (MetricsInterface, error)
+// HawkularGetter has a method to access the HawkularRESTAPI interface
+type HawkularGetter interface {
+	GetHawkularRESTAPI(config *MetricsClientConfig) (HawkularRESTAPI, error)
 }
 
-// MetricsInterface provides methods to obtain performance metrics of a deployed application
-type MetricsInterface interface {
-	GetCPUMetrics(pods []v1.Pod, namespace string, startTime time.Time) (*app.TimedNumberTuple, error)
-	GetCPUMetricsRange(pods []v1.Pod, namespace string, startTime time.Time, endTime time.Time,
+// Metrics provides methods to obtain performance metrics of a deployed application
+type Metrics interface {
+	GetCPUMetrics(pods []*v1.Pod, namespace string, startTime time.Time) (*app.TimedNumberTuple, error)
+	GetCPUMetricsRange(pods []*v1.Pod, namespace string, startTime time.Time, endTime time.Time,
 		limit int) ([]*app.TimedNumberTuple, error)
-	GetMemoryMetrics(pods []v1.Pod, namespace string, startTime time.Time) (*app.TimedNumberTuple, error)
-	GetMemoryMetricsRange(pods []v1.Pod, namespace string, startTime time.Time, endTime time.Time,
+	GetMemoryMetrics(pods []*v1.Pod, namespace string, startTime time.Time) (*app.TimedNumberTuple, error)
+	GetMemoryMetricsRange(pods []*v1.Pod, namespace string, startTime time.Time, endTime time.Time,
 		limit int) ([]*app.TimedNumberTuple, error)
+	GetNetworkSentMetrics(pods []*v1.Pod, namespace string, startTime time.Time) (*app.TimedNumberTuple, error)
+	GetNetworkSentMetricsRange(pods []*v1.Pod, namespace string, startTime time.Time, endTime time.Time,
+		limit int) ([]*app.TimedNumberTuple, error)
+	GetNetworkRecvMetrics(pods []*v1.Pod, namespace string, startTime time.Time) (*app.TimedNumberTuple, error)
+	GetNetworkRecvMetricsRange(pods []*v1.Pod, namespace string, startTime time.Time, endTime time.Time,
+		limit int) ([]*app.TimedNumberTuple, error)
+	Close()
+}
+
+// HawkularRESTAPI collects methods that call out to the Hawkular metrics server over the network
+type HawkularRESTAPI interface {
+	ReadBuckets(metricType hawkular.MetricType, namespace string,
+		modifiers ...hawkular.Modifier) ([]*hawkular.Bucketpoint, error)
+	Close()
+}
+
+// Default receiver for HawkularRESTAPI methods
+type hawkularHelper struct {
+	client *hawkular.Client
 }
 
 const (
@@ -47,44 +78,95 @@ const bucketDuration = 1 * time.Minute
 const millicoreToCoreScale = 0.001
 const noScale = 1
 
-func newMetricsClient(metricsURL string, bearerToken string) (MetricsInterface, error) {
-	params := hawkular.Parameters{
-		Url:   metricsURL,
-		Token: bearerToken,
+// NewMetricsClient creates a Metrics object given a configuration
+func NewMetricsClient(config *MetricsClientConfig) (Metrics, error) {
+	// Use default implementation if no HawkularGetter is specified
+	if config.HawkularGetter == nil {
+		config.HawkularGetter = &defaultGetter{}
 	}
-	client, err := hawkular.NewHawkularClient(params)
+	helper, err := config.GetHawkularRESTAPI(config)
 	if err != nil {
 		return nil, err
 	}
-
-	mc := new(metricsClient)
-	mc.hawkularClient = client
+	mc := &metricsClient{
+		HawkularRESTAPI: helper,
+	}
 
 	return mc, nil
 }
 
-func (mc *metricsClient) GetCPUMetrics(pods []v1.Pod, namespace string, startTime time.Time) (*app.TimedNumberTuple, error) {
+func (*defaultGetter) GetHawkularRESTAPI(config *MetricsClientConfig) (HawkularRESTAPI, error) {
+	params := hawkular.Parameters{
+		Url:   config.MetricsURL,
+		Token: config.BearerToken,
+	}
+	client, err := hawkular.NewHawkularClient(params)
+	if err != nil {
+		return nil, errs.WithStack(err)
+	}
+
+	helper := &hawkularHelper{
+		client: client,
+	}
+	return helper, nil
+}
+
+func (mc *metricsClient) Close() {
+	mc.HawkularRESTAPI.Close()
+}
+
+func (mc *metricsClient) GetCPUMetrics(pods []*v1.Pod, namespace string, startTime time.Time) (*app.TimedNumberTuple, error) {
 	return mc.getBucketAverage(pods, namespace, cpuDesc, startTime, millicoreToCoreScale)
 }
 
-func (mc *metricsClient) GetCPUMetricsRange(pods []v1.Pod, namespace string,
+func (mc *metricsClient) GetCPUMetricsRange(pods []*v1.Pod, namespace string,
 	startTime time.Time, endTime time.Time, limit int) ([]*app.TimedNumberTuple, error) {
 	buckets, err := mc.getBucketsInRange(pods, namespace, cpuDesc, startTime, endTime, limit)
 	if err != nil {
-		return nil, err
+		return nil, errs.WithStack(err)
 	}
 
 	results := bucketsToTuples(buckets, millicoreToCoreScale)
 	return results, nil
 }
 
-func (mc *metricsClient) GetMemoryMetrics(pods []v1.Pod, namespace string, startTime time.Time) (*app.TimedNumberTuple, error) {
+func (mc *metricsClient) GetMemoryMetrics(pods []*v1.Pod, namespace string, startTime time.Time) (*app.TimedNumberTuple, error) {
 	return mc.getBucketAverage(pods, namespace, memDesc, startTime, noScale)
 }
 
-func (mc *metricsClient) GetMemoryMetricsRange(pods []v1.Pod, namespace string,
+func (mc *metricsClient) GetMemoryMetricsRange(pods []*v1.Pod, namespace string,
 	startTime time.Time, endTime time.Time, limit int) ([]*app.TimedNumberTuple, error) {
 	buckets, err := mc.getBucketsInRange(pods, namespace, memDesc, startTime, endTime, limit)
+	if err != nil {
+		return nil, errs.WithStack(err)
+	}
+
+	results := bucketsToTuples(buckets, noScale)
+	return results, nil
+}
+
+func (mc *metricsClient) GetNetworkSentMetrics(pods []*v1.Pod, namespace string, startTime time.Time) (*app.TimedNumberTuple, error) {
+	return mc.getBucketAverage(pods, namespace, netSent, startTime, noScale)
+}
+
+func (mc *metricsClient) GetNetworkSentMetricsRange(pods []*v1.Pod, namespace string,
+	startTime time.Time, endTime time.Time, limit int) ([]*app.TimedNumberTuple, error) {
+	buckets, err := mc.getBucketsInRange(pods, namespace, netSent, startTime, endTime, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	results := bucketsToTuples(buckets, noScale)
+	return results, nil
+}
+
+func (mc *metricsClient) GetNetworkRecvMetrics(pods []*v1.Pod, namespace string, startTime time.Time) (*app.TimedNumberTuple, error) {
+	return mc.getBucketAverage(pods, namespace, netRecv, startTime, noScale)
+}
+
+func (mc *metricsClient) GetNetworkRecvMetricsRange(pods []*v1.Pod, namespace string,
+	startTime time.Time, endTime time.Time, limit int) ([]*app.TimedNumberTuple, error) {
+	buckets, err := mc.getBucketsInRange(pods, namespace, netRecv, startTime, endTime, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -117,11 +199,11 @@ func convertToUnixMillis(t time.Time) int64 {
 	return hawkular.ToUnixMilli(t)
 }
 
-func (mc *metricsClient) getBucketAverage(pods []v1.Pod, namespace, descTag string,
+func (mc *metricsClient) getBucketAverage(pods []*v1.Pod, namespace, descTag string,
 	startTime time.Time, scale float64) (*app.TimedNumberTuple, error) {
 	result, err := mc.getLatestBucket(pods, namespace, descTag, startTime)
 	if err != nil {
-		return nil, err
+		return nil, errs.WithStack(err)
 	} else if result == nil {
 		return nil, nil
 	}
@@ -130,28 +212,28 @@ func (mc *metricsClient) getBucketAverage(pods []v1.Pod, namespace, descTag stri
 	return tuple, err
 }
 
-func (mc *metricsClient) getLatestBucket(pods []v1.Pod, namespace string, descTag string,
+func (mc *metricsClient) getLatestBucket(pods []*v1.Pod, namespace string, descTag string,
 	startTime time.Time) (*hawkular.Bucketpoint, error) {
 	// Get one bucket after the specified start time
 	endTime := startTime.Add(bucketDuration)
 	buckets, err := mc.readBuckets(pods, namespace, descTag, hawkular.StartTimeFilter(startTime),
 		hawkular.EndTimeFilter(endTime), hawkular.BucketsFilter(1))
 	if err != nil {
-		return nil, err
+		return nil, errs.WithStack(err)
 	} else if len(buckets) == 0 { // Should have gotten at most one bucket
 		return nil, nil
 	}
 	return buckets[0], nil
 }
 
-func (mc *metricsClient) getBucketsInRange(pods []v1.Pod, namespace string, descTag string, startTime time.Time,
+func (mc *metricsClient) getBucketsInRange(pods []*v1.Pod, namespace string, descTag string, startTime time.Time,
 	endTime time.Time, limit int) ([]*hawkular.Bucketpoint, error) {
 	// Note: returned buckets are ordered by start time
 	// https://github.com/hawkular/hawkular-metrics/blob/0.28.3/core/metrics-model/src/main/java/org/hawkular/metrics/model/BucketPoint.java#L70
 	buckets, err := mc.readBuckets(pods, namespace, descTag, hawkular.StartTimeFilter(startTime),
 		hawkular.EndTimeFilter(endTime), hawkular.BucketsDurationFilter(bucketDuration))
 	if err != nil {
-		return nil, err
+		return nil, errs.WithStack(err)
 	}
 
 	// Hawkular buckets may extend beyond the requested endpoint if
@@ -182,7 +264,7 @@ func (mc *metricsClient) getBucketsInRange(pods []v1.Pod, namespace string, desc
 	return buckets, nil
 }
 
-func (mc *metricsClient) readBuckets(pods []v1.Pod, namespace string, descTag string,
+func (mc *metricsClient) readBuckets(pods []*v1.Pod, namespace string, descTag string,
 	filters ...hawkular.Filter) ([]*hawkular.Bucketpoint, error) {
 	numPods := len(pods)
 	if numPods == 0 {
@@ -202,9 +284,18 @@ func (mc *metricsClient) readBuckets(pods []v1.Pod, namespace string, descTag st
 		podIDTag:      podsForTag,
 	}
 
-	// Tenant should be set to OSO project name
-	mc.hawkularClient.Tenant = namespace
 	// Append other filters to those provided
 	filters = append(filters, hawkular.TagsFilter(tags), hawkular.StackedFilter() /* Sum of each pod */)
-	return mc.hawkularClient.ReadBuckets(hawkular.Gauge, hawkular.Filters(filters...))
+	return mc.ReadBuckets(hawkular.Gauge, namespace, hawkular.Filters(filters...))
+}
+
+func (helper *hawkularHelper) ReadBuckets(metricType hawkular.MetricType, namespace string,
+	modifiers ...hawkular.Modifier) ([]*hawkular.Bucketpoint, error) {
+	// Tenant should be set to OSO project name
+	helper.client.Tenant = namespace
+	return helper.client.ReadBuckets(metricType, modifiers...)
+}
+
+func (helper *hawkularHelper) Close() {
+	helper.client.Close()
 }
