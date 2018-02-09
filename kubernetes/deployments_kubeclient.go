@@ -67,6 +67,7 @@ type KubeClientInterface interface {
 		startTime time.Time) (*app.SimpleDeploymentStats, error)
 	GetDeploymentStatSeries(spaceName string, appName string, envName string, startTime time.Time,
 		endTime time.Time, limit int) (*app.SimpleDeploymentStatSeries, error)
+	DeleteDeployment(spaceName string, appName string, envName string) error
 	GetEnvironments() ([]*app.SimpleEnvironment, error)
 	GetEnvironment(envName string) (*app.SimpleEnvironment, error)
 	GetPodsInNamespace(nameSpace string, appName string) ([]v1.Pod, error)
@@ -90,9 +91,11 @@ type KubeRESTAPI interface {
 type OpenShiftRESTAPI interface {
 	GetBuildConfigs(namespace string, labelSelector string) (map[string]interface{}, error)
 	GetDeploymentConfig(namespace string, name string) (map[string]interface{}, error)
+	DeleteDeploymentConfig(namespace string, name string, opts *metaV1.DeleteOptions) error
 	GetDeploymentConfigScale(namespace string, name string) (map[string]interface{}, error)
 	SetDeploymentConfigScale(namespace string, name string, scale map[string]interface{}) error
 	GetRoutes(namespace string) (map[string]interface{}, error)
+	DeleteRoutes(namespace string, labelSelector string, opts *metaV1.DeleteOptions) error
 }
 
 type openShiftAPIClient struct {
@@ -302,7 +305,7 @@ func (oc *openShiftAPIClient) GetDeploymentConfigScale(namespace string, name st
 
 func (oc *openShiftAPIClient) SetDeploymentConfigScale(namespace string, name string, scale map[string]interface{}) error {
 	dcScaleURL := fmt.Sprintf("/oapi/v1/namespaces/%s/deploymentconfigs/%s/scale", namespace, name)
-	return oc.putResource(dcScaleURL, scale)
+	return oc.sendResource(dcScaleURL, "PUT", scale)
 }
 
 func (kc *kubeClient) getConsoleURL(envNS string) (*string, error) {
@@ -510,6 +513,29 @@ func (kc *kubeClient) GetDeploymentStatSeries(spaceName string, appName string, 
 	return result, nil
 }
 
+func (kc *kubeClient) DeleteDeployment(spaceName string, appName string, envName string) error {
+	envNS, err := kc.getEnvironmentNamespace(envName)
+	if err != nil {
+		return errs.WithStack(err)
+	}
+	// Delete routes
+	err = kc.deleteRoutes(appName, envNS)
+	if err != nil {
+		return err
+	}
+	// Delete services
+	err = kc.deleteServices(appName, envNS)
+	if err != nil {
+		return err
+	}
+	// Delete DC (will also delete RCs and pods)
+	err = kc.deleteDeploymentConfig(spaceName, appName, envNS)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // GetEnvironments retrieves information on all environments in the cluster
 // for the current user
 func (kc *kubeClient) GetEnvironments() ([]*app.SimpleEnvironment, error) {
@@ -684,8 +710,8 @@ func (kc *kubeClient) getEnvironmentNamespace(envName string) (string, error) {
 }
 
 // Derived from: https://github.com/fabric8-services/fabric8-tenant/blob/master/openshift/kube_token.go
-func (oc *openShiftAPIClient) putResource(url string, putBody map[string]interface{}) error {
-	marshalled, err := json.Marshal(putBody)
+func (oc *openShiftAPIClient) sendResource(url string, method string, reqBody interface{}) error {
+	marshalled, err := json.Marshal(reqBody)
 	if err != nil {
 		return errs.WithStack(err)
 	}
@@ -707,7 +733,7 @@ func (oc *openShiftAPIClient) putResource(url string, putBody map[string]interfa
 
 	status := resp.StatusCode
 	if httpStatusFailed(status) {
-		return errs.Errorf("failed to PUT url %s: status code %d", fullURL, status)
+		return errs.Errorf("failed to %s url %s: status code %d", method, fullURL, status)
 	}
 	return nil
 }
@@ -762,6 +788,32 @@ func (kc *kubeClient) getDeploymentConfig(namespace string, appName string, spac
 func (oc *openShiftAPIClient) GetDeploymentConfig(namespace string, name string) (map[string]interface{}, error) {
 	dcURL := fmt.Sprintf("/oapi/v1/namespaces/%s/deploymentconfigs/%s", namespace, name)
 	return oc.getResource(dcURL, true)
+}
+
+func (kc *kubeClient) deleteDeploymentConfig(spaceName string, appName string, namespace string) error {
+	// Check that the deployment config belongs to the expected space
+	_, err := kc.getDeploymentConfig(namespace, appName, spaceName)
+	if err != nil {
+		return err
+	}
+
+	// Delete all dependent objects and then this DC
+	policy := metaV1.DeletePropagationForeground
+	opts := &metaV1.DeleteOptions{
+		PropagationPolicy: &policy,
+	}
+	err = kc.DeleteDeploymentConfig(namespace, appName, opts)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (oc *openShiftAPIClient) DeleteDeploymentConfig(namespace string, name string, opts *metaV1.DeleteOptions) error {
+	dcURL := fmt.Sprintf("/oapi/v1/namespaces/%s/deploymentconfigs/%s", namespace, name)
+	// API states this should return a Status object, but it returns the DC instead,
+	// just check for no HTTP error
+	return oc.sendResource(dcURL, "DELETE", opts)
 }
 
 func (kc *kubeClient) getCurrentDeployment(space string, appName string, namespace string) (*deployment, error) {
@@ -1356,6 +1408,54 @@ func scoreRoute(route *route) int {
 		score++
 	}
 	return score
+}
+
+func (kc *kubeClient) deleteServices(appName string, envNS string) error {
+	// Delete all dependent objects before deleting the service
+	policy := metaV1.DeletePropagationForeground
+	delOpts := &metaV1.DeleteOptions{
+		PropagationPolicy: &policy,
+	}
+	// Delete all services in namespace with matching 'app' label
+	listOpts := metaV1.ListOptions{
+		LabelSelector: "app=" + appName,
+	}
+	// The API server rejects deleting services by label, so get all
+	// services with the label, and delete one-by-one
+	services, err := kc.Services(envNS).List(listOpts)
+	if err != nil {
+		return errs.WithStack(err)
+	}
+	for _, service := range services.Items {
+		err = kc.Services(envNS).Delete(service.Name, delOpts)
+		if err != nil {
+			return errs.WithStack(err)
+		}
+	}
+	return nil
+}
+
+func (kc *kubeClient) deleteRoutes(appName string, envNS string) error {
+	// Delete all routes in namespace with matching 'app' label
+	escapedSelector := url.QueryEscape("app=" + appName)
+
+	// Delete all dependent objects before deleting the route
+	policy := metaV1.DeletePropagationForeground
+	opts := &metaV1.DeleteOptions{
+		PropagationPolicy: &policy,
+	}
+	err := kc.DeleteRoutes(envNS, escapedSelector, opts)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (oc *openShiftAPIClient) DeleteRoutes(namespace string, labelSelector string, opts *metaV1.DeleteOptions) error {
+	routesURL := fmt.Sprintf("/oapi/v1/namespaces/%s/routes?labelSelector=%s", namespace, labelSelector)
+	// API states this should return a Status object, but it returns the route instead,
+	// just check for no HTTP error
+	return oc.sendResource(routesURL, "DELETE", opts)
 }
 
 // Derived from: https://github.com/fabric8-services/fabric8-tenant/blob/master/openshift/kube_token.go
