@@ -913,7 +913,7 @@ func TestGetSpace(t *testing.T) {
 			bcJson:    "buildconfigs-two.json",
 			appTestData: map[string]*appTestData{
 				"myApp": defaultAppTestData,
-				"myOtherApp": &appTestData{
+				"myOtherApp": {
 					spaceName: "mySpace",
 					appName:   "myOtherApp",
 				},
@@ -925,7 +925,7 @@ func TestGetSpace(t *testing.T) {
 			spaceName: "mySpace", // Test two deployed applications, with two environments
 			bcJson:    "buildconfigs-two.json",
 			appTestData: map[string]*appTestData{
-				"myApp": &appTestData{
+				"myApp": {
 					spaceName: "mySpace",
 					appName:   "myApp",
 					deployTestData: map[string]*deployTestData{
@@ -959,7 +959,7 @@ func TestGetSpace(t *testing.T) {
 						},
 					},
 				},
-				"myOtherApp": &appTestData{
+				"myOtherApp": {
 					spaceName: "mySpace",
 					appName:   "myOtherApp",
 					deployTestData: map[string]*deployTestData{
