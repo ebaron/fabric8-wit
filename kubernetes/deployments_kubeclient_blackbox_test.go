@@ -37,17 +37,30 @@ type testKube struct {
 type testFixture struct {
 	cmInput      *configMapInput
 	rqInput      *resourceQuotaInput
-	rcInput      map[string]string     // namespace -> RC JSON file
-	podInput     map[string]string     // namespace -> pod JSON file
-	svcInput     map[string]string     // namespace -> service JSON file
-	routeInput   map[string]string     // namespace -> route JSON file
 	bcInput      string                // BC json file
-	dcInput      deploymentConfigInput // app name -> namespace -> DC json file
 	scaleInput   deploymentConfigInput // app name -> namespace -> DC scale json file
 	metricsInput *metricsInput
 	kube         *testKube
 	os           *testOpenShift
 	metrics      *testMetrics
+	deploymentInput
+}
+
+// Collects input data necessary to retrieve a deployment
+type deploymentInput struct {
+	dcInput    deploymentConfigInput // app name -> namespace -> DC json file
+	rcInput    map[string]string     // namespace -> RC JSON file
+	podInput   map[string]string     // namespace -> pod JSON file
+	svcInput   map[string]string     // namespace -> service JSON file
+	routeInput map[string]string     // namespace -> route JSON file
+}
+
+var defaultDeploymentInput = deploymentInput{
+	dcInput:    defaultDeploymentConfigInput,
+	rcInput:    defaultReplicationControllerInput,
+	podInput:   defaultPodInput,
+	svcInput:   defaultServiceInput,
+	routeInput: defaultRouteInput,
 }
 
 func getDefaultKubeClient(fixture *testFixture, t *testing.T) kubernetes.KubeClientInterface {
@@ -290,7 +303,7 @@ func (tk *testKube) Services(ns string) corev1.ServiceInterface {
 func (svc *testService) List(options metav1.ListOptions) (*v1.ServiceList, error) {
 	var result v1.ServiceList
 	if len(svc.inputFile) == 0 {
-		// No matching RC
+		// No matching service
 		return &result, nil
 	}
 	err := readJSON(svc.inputFile, &result)
@@ -715,9 +728,9 @@ func TestGetEnvironment(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.testName, func(t *testing.T) {
-
 			input := testCase.input
 			fixture.rqInput = input
+
 			env, err := kc.GetEnvironment(input.name)
 			if testCase.shouldFail {
 				require.Error(t, err, "Expected an error")
@@ -746,53 +759,37 @@ func TestGetEnvironment(t *testing.T) {
 }
 
 type spaceTestData struct {
-	testName   string
-	spaceName  string
-	shouldFail bool
-	bcJson     string
-	appInput   map[string]*appTestData // Keys are app names
-	dcInput    deploymentConfigInput
-	rcInput    map[string]string
-	podInput   map[string]string
-	svcInput   map[string]string
-	routeInput map[string]string
+	testName    string
+	spaceName   string
+	shouldFail  bool
+	bcJson      string
+	appTestData map[string]*appTestData // Keys are app names
+	deploymentInput
 }
 
 var defaultSpaceTestData = &spaceTestData{
-	testName:   "Basic",
-	spaceName:  "mySpace",
-	bcJson:     "buildconfigs-one.json",
-	appInput:   map[string]*appTestData{"myApp": defaultAppTestData},
-	dcInput:    defaultDeploymentConfigInput,
-	rcInput:    defaultReplicationControllerInput,
-	podInput:   defaultPodInput,
-	svcInput:   defaultServiceInput,
-	routeInput: defaultRouteInput,
+	testName:        "Basic",
+	spaceName:       "mySpace",
+	bcJson:          "buildconfigs-one.json",
+	appTestData:     map[string]*appTestData{"myApp": defaultAppTestData},
+	deploymentInput: defaultDeploymentInput,
 }
 
 type appTestData struct {
-	testName    string
-	spaceName   string
-	appName     string
-	shouldFail  bool
-	deployInput map[string]*deployTestData // Keys are environment names
-	dcInput     deploymentConfigInput
-	rcInput     map[string]string
-	podInput    map[string]string
-	svcInput    map[string]string
-	routeInput  map[string]string // TODO make deploymentInput embedded struct
+	testName       string
+	spaceName      string
+	appName        string
+	shouldFail     bool
+	deployTestData map[string]*deployTestData // Keys are environment names
+	deploymentInput
 }
 
 var defaultAppTestData = &appTestData{
-	testName:    "Basic",
-	spaceName:   "mySpace",
-	appName:     "myApp",
-	deployInput: map[string]*deployTestData{"run": defaultDeployTestData},
-	dcInput:     defaultDeploymentConfigInput,
-	rcInput:     defaultReplicationControllerInput,
-	podInput:    defaultPodInput,
-	svcInput:    defaultServiceInput,
-	routeInput:  defaultRouteInput,
+	testName:        "Basic",
+	spaceName:       "mySpace",
+	appName:         "myApp",
+	deployTestData:  map[string]*deployTestData{"run": defaultDeployTestData},
+	deploymentInput: defaultDeploymentInput,
 }
 
 type deployTestData struct {
@@ -808,11 +805,7 @@ type deployTestData struct {
 	expectLogURL     string
 	expectAppURL     string
 	shouldFail       bool
-	dcInput          deploymentConfigInput
-	rcInput          map[string]string
-	podInput         map[string]string
-	svcInput         map[string]string
-	routeInput       map[string]string
+	deploymentInput
 }
 
 var defaultDeployTestData = &deployTestData{
@@ -829,11 +822,7 @@ var defaultDeployTestData = &deployTestData{
 	expectConsoleURL: "http://console.myCluster/console/project/my-run",
 	expectLogURL:     "http://console.myCluster/console/project/my-run/browse/rc/myApp-1?tab=logs",
 	expectAppURL:     "http://myApp-my-run.example.com",
-	dcInput:          defaultDeploymentConfigInput,
-	rcInput:          defaultReplicationControllerInput,
-	podInput:         defaultPodInput,
-	svcInput:         defaultServiceInput,
-	routeInput:       defaultRouteInput,
+	deploymentInput:  defaultDeploymentInput,
 }
 
 type deployStatsTestData struct {
@@ -922,28 +911,24 @@ func TestGetSpace(t *testing.T) {
 			testName:  "Two Apps One Deployed",
 			spaceName: "mySpace", // Test two BCs, but only one DC
 			bcJson:    "buildconfigs-two.json",
-			appInput: map[string]*appTestData{
+			appTestData: map[string]*appTestData{
 				"myApp": defaultAppTestData,
 				"myOtherApp": &appTestData{
 					spaceName: "mySpace",
 					appName:   "myOtherApp",
 				},
 			},
-			dcInput:    defaultDeploymentConfigInput,
-			rcInput:    defaultReplicationControllerInput,
-			podInput:   defaultPodInput,
-			svcInput:   defaultServiceInput,
-			routeInput: defaultRouteInput,
+			deploymentInput: defaultDeploymentInput,
 		},
 		{
 			testName:  "Two Apps Both Deployed",
 			spaceName: "mySpace", // Test two deployed applications, with two environments
 			bcJson:    "buildconfigs-two.json",
-			appInput: map[string]*appTestData{
+			appTestData: map[string]*appTestData{
 				"myApp": &appTestData{
 					spaceName: "mySpace",
 					appName:   "myApp",
-					deployInput: map[string]*deployTestData{
+					deployTestData: map[string]*deployTestData{
 						"run": {
 							spaceName:     "mySpace",
 							appName:       "myApp",
@@ -977,7 +962,7 @@ func TestGetSpace(t *testing.T) {
 				"myOtherApp": &appTestData{
 					spaceName: "mySpace",
 					appName:   "myOtherApp",
-					deployInput: map[string]*deployTestData{
+					deployTestData: map[string]*deployTestData{
 						"run": {
 							spaceName:     "mySpace",
 							appName:       "myOtherApp",
@@ -995,30 +980,32 @@ func TestGetSpace(t *testing.T) {
 					},
 				},
 			},
-			dcInput: deploymentConfigInput{
-				"myApp": {
-					"my-run":   "deploymentconfig-one.json",
-					"my-stage": "deploymentconfig-one-stage.json",
+			deploymentInput: deploymentInput{
+				dcInput: deploymentConfigInput{
+					"myApp": {
+						"my-run":   "deploymentconfig-one.json",
+						"my-stage": "deploymentconfig-one-stage.json",
+					},
+					"myOtherApp": {
+						"my-run": "deploymentconfig-other.json",
+					},
 				},
-				"myOtherApp": {
-					"my-run": "deploymentconfig-other.json",
+				rcInput: map[string]string{
+					"my-run":   "replicationcontroller-two.json",
+					"my-stage": "replicationcontroller.json",
 				},
-			},
-			rcInput: map[string]string{
-				"my-run":   "replicationcontroller-two.json",
-				"my-stage": "replicationcontroller.json",
-			},
-			podInput: map[string]string{
-				"my-run":   "pods-two-apps.json",
-				"my-stage": "pods-one-stopped.json",
-			},
-			svcInput: map[string]string{
-				"my-run":   "services-two.json",
-				"my-stage": "services-zero.json",
-			},
-			routeInput: map[string]string{
-				"my-run":   "routes-two.json",
-				"my-stage": "routes-zero.json",
+				podInput: map[string]string{
+					"my-run":   "pods-two-apps.json",
+					"my-stage": "pods-one-stopped.json",
+				},
+				svcInput: map[string]string{
+					"my-run":   "services-two.json",
+					"my-stage": "services-zero.json",
+				},
+				routeInput: map[string]string{
+					"my-run":   "routes-two.json",
+					"my-stage": "routes-zero.json",
+				},
 			},
 		},
 	}
@@ -1029,11 +1016,7 @@ func TestGetSpace(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.testName, func(t *testing.T) {
 			fixture.bcInput = testCase.bcJson
-			fixture.dcInput = testCase.dcInput
-			fixture.rcInput = testCase.rcInput
-			fixture.podInput = testCase.podInput
-			fixture.svcInput = testCase.svcInput
-			fixture.routeInput = testCase.routeInput
+			fixture.deploymentInput = testCase.deploymentInput
 
 			space, err := kc.GetSpace(testCase.spaceName)
 			if testCase.shouldFail {
@@ -1047,7 +1030,7 @@ func TestGetSpace(t *testing.T) {
 				for _, app := range space.Attributes.Applications {
 					var appInput *appTestData
 					if app != nil {
-						appInput = testCase.appInput[app.Attributes.Name]
+						appInput = testCase.appTestData[app.Attributes.Name]
 						require.NotNil(t, appInput, "Unknown app: "+app.Attributes.Name)
 					}
 					verifyApplication(app, appInput, t)
@@ -1086,7 +1069,7 @@ func TestGetApplication(t *testing.T) {
 			testName:  "Two Environments",
 			spaceName: "mySpace",
 			appName:   "myApp",
-			deployInput: map[string]*deployTestData{
+			deployTestData: map[string]*deployTestData{
 				"run": defaultDeployTestData,
 				"stage": {
 					spaceName:     "mySpace",
@@ -1103,17 +1086,19 @@ func TestGetApplication(t *testing.T) {
 					expectLogURL:     "http://console.myCluster/console/project/my-stage/browse/rc/myApp-1?tab=logs",
 				},
 			},
-			dcInput:    dcInput,
-			rcInput:    rcInput,
-			podInput:   podInput,
-			svcInput:   svcInput,
-			routeInput: routeInput,
+			deploymentInput: deploymentInput{
+				dcInput:    dcInput,
+				rcInput:    rcInput,
+				podInput:   podInput,
+				svcInput:   svcInput,
+				routeInput: routeInput,
+			},
 		},
 		{
 			testName:  "No Pods",
 			spaceName: "mySpace", // Test deployment with no pods
 			appName:   "myOtherApp",
-			deployInput: map[string]*deployTestData{
+			deployTestData: map[string]*deployTestData{
 				"run": {
 					envName:          "run",
 					envNS:            "my-run",
@@ -1123,17 +1108,19 @@ func TestGetApplication(t *testing.T) {
 					expectAppURL:     "http://myOtherApp-my-run.example.com",
 				},
 			},
-			dcInput: deploymentConfigInput{
-				"myOtherApp": {
-					"my-run": "deploymentconfig-other.json",
+			deploymentInput: deploymentInput{
+				dcInput: deploymentConfigInput{
+					"myOtherApp": {
+						"my-run": "deploymentconfig-other.json",
+					},
 				},
+				rcInput: map[string]string{
+					"my-run": "replicationcontroller-two.json",
+				},
+				podInput:   defaultPodInput,
+				svcInput:   svcInput,
+				routeInput: routeInput,
 			},
-			rcInput: map[string]string{
-				"my-run": "replicationcontroller-two.json",
-			},
-			podInput:   defaultPodInput,
-			svcInput:   svcInput,
-			routeInput: routeInput,
 		},
 	}
 
@@ -1142,11 +1129,7 @@ func TestGetApplication(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.testName, func(t *testing.T) {
-			fixture.dcInput = testCase.dcInput
-			fixture.rcInput = testCase.rcInput
-			fixture.podInput = testCase.podInput
-			fixture.svcInput = testCase.svcInput
-			fixture.routeInput = testCase.routeInput
+			fixture.deploymentInput = testCase.deploymentInput
 
 			app, err := kc.GetApplication(testCase.spaceName, testCase.appName)
 			if testCase.shouldFail {
@@ -1163,16 +1146,12 @@ func TestGetDeployment(t *testing.T) {
 	testCases := []*deployTestData{
 		defaultDeployTestData,
 		{
-			testName:   "Bad Environment",
-			spaceName:  "mySpace",
-			appName:    "myApp",
-			envName:    "doesNotExist",
-			dcInput:    defaultDeploymentConfigInput,
-			rcInput:    defaultReplicationControllerInput,
-			podInput:   defaultPodInput,
-			svcInput:   defaultServiceInput,
-			routeInput: defaultRouteInput,
-			shouldFail: true,
+			testName:        "Bad Environment",
+			spaceName:       "mySpace",
+			appName:         "myApp",
+			envName:         "doesNotExist",
+			deploymentInput: defaultDeploymentInput,
+			shouldFail:      true,
 		},
 	}
 
@@ -1181,11 +1160,7 @@ func TestGetDeployment(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.testName, func(t *testing.T) {
-			fixture.dcInput = testCase.dcInput
-			fixture.rcInput = testCase.rcInput
-			fixture.podInput = testCase.podInput
-			fixture.svcInput = testCase.svcInput
-			fixture.routeInput = testCase.routeInput
+			fixture.deploymentInput = testCase.deploymentInput
 
 			dep, err := kc.GetDeployment(testCase.spaceName, testCase.appName, testCase.envName)
 			if testCase.shouldFail {
@@ -1400,11 +1375,11 @@ func verifyApplication(app *app.SimpleApp, testCase *appTestData, t *testing.T) 
 	require.NotNil(t, app.Attributes, "Application attributes are nil")
 	require.Equal(t, testCase.appName, app.Attributes.Name, "Incorrect application name")
 	require.NotNil(t, app.Attributes.Deployments, "Deployments are nil")
-	require.Equal(t, len(testCase.deployInput), len(app.Attributes.Deployments), "Wrong number of deployments")
+	require.Equal(t, len(testCase.deployTestData), len(app.Attributes.Deployments), "Wrong number of deployments")
 	for _, dep := range app.Attributes.Deployments {
 		var depInput *deployTestData
 		if dep != nil {
-			depInput = testCase.deployInput[dep.Attributes.Name]
+			depInput = testCase.deployTestData[dep.Attributes.Name]
 			require.NotNil(t, depInput, "Unknown env: "+dep.Attributes.Name)
 		}
 		verifyDeployment(dep, depInput, t)
