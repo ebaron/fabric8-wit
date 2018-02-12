@@ -32,6 +32,7 @@ type testKube struct {
 	rcHolder               *testReplicationController
 	podHolder              *testPod
 	svcHolder              *testService
+	svcDelHolder           []*testDeleteByName
 }
 
 type testFixture struct {
@@ -288,6 +289,7 @@ type testService struct {
 	corev1.ServiceInterface
 	inputFile string
 	namespace string
+	kube      *testKube
 }
 
 func (tk *testKube) Services(ns string) corev1.ServiceInterface {
@@ -295,6 +297,7 @@ func (tk *testKube) Services(ns string) corev1.ServiceInterface {
 	result := &testService{
 		inputFile: input,
 		namespace: ns,
+		kube:      tk,
 	}
 	tk.svcHolder = result
 	return result
@@ -311,7 +314,12 @@ func (svc *testService) List(options metav1.ListOptions) (*v1.ServiceList, error
 }
 
 func (svc *testService) Delete(name string, options *metav1.DeleteOptions) error {
-	// TODO
+	delHolder := &testDeleteByName{
+		namespace: svc.namespace,
+		name:      name,
+		opts:      options,
+	}
+	svc.kube.svcDelHolder = append(svc.kube.svcDelHolder, delHolder)
 	return nil
 }
 
@@ -442,14 +450,28 @@ func (tm *testMetrics) getManyMetrics(metrics []*app.TimedNumberTuple, pods []*v
 // OpenShift API fakes
 
 type testOpenShift struct {
-	fixture     *testFixture
-	scaleHolder *testScale
+	fixture        *testFixture
+	scaleHolder    *testScale
+	delDCHolder    *testDeleteByName
+	delRouteHolder *testDeleteByLabel
 }
 
 type testScale struct {
 	scaleOutput map[string]interface{}
 	namespace   string
 	dcName      string
+}
+
+type testDeleteByName struct {
+	namespace string
+	name      string
+	opts      *metav1.DeleteOptions
+}
+
+type testDeleteByLabel struct {
+	namespace     string
+	labelSelector string
+	opts          *metav1.DeleteOptions
 }
 
 func (fixture *testFixture) GetOpenShiftRESTAPI(config *kubernetes.KubeClientConfig) (kubernetes.OpenShiftRESTAPI, error) {
@@ -509,7 +531,11 @@ func (to *testOpenShift) GetDeploymentConfig(namespace string, name string) (map
 }
 
 func (to *testOpenShift) DeleteDeploymentConfig(namespace string, name string, opts *metav1.DeleteOptions) error {
-	// TODO
+	to.delDCHolder = &testDeleteByName{
+		namespace: namespace,
+		name:      name,
+		opts:      opts,
+	}
 	return nil
 }
 
@@ -549,7 +575,11 @@ func (to *testOpenShift) GetRoutes(namespace string) (map[string]interface{}, er
 }
 
 func (to *testOpenShift) DeleteRoutes(namespace string, labelSelector string, opts *metav1.DeleteOptions) error {
-	// TODO
+	to.delRouteHolder = &testDeleteByLabel{
+		namespace:     namespace,
+		labelSelector: labelSelector,
+		opts:          opts,
+	}
 	return nil
 }
 
@@ -1257,6 +1287,110 @@ func TestScaleDeployment(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDeleteDeployment(t *testing.T) {
+	// DeleteOptions do not change
+	policy := metav1.DeletePropagationForeground
+	expectOpts := &metav1.DeleteOptions{
+		PropagationPolicy: &policy,
+	}
+	services := []string{"myApp", "myOtherApp"} // Test impl doesn't check labels
+	testCases := []struct {
+		testName       string
+		spaceName      string
+		appName        string
+		envName        string
+		expectNS       string
+		expectSelector string
+		expectServices []string
+		shouldFail     bool
+		deploymentInput
+	}{
+		{
+			testName:        "Basic",
+			spaceName:       "mySpace",
+			appName:         "myApp",
+			envName:         "run",
+			expectNS:        "my-run",
+			expectSelector:  "app%3DmyApp",
+			expectServices:  services,
+			deploymentInput: defaultDeploymentInput,
+		},
+		{
+			testName:        "Bad Environment",
+			spaceName:       "mySpace",
+			appName:         "myApp",
+			envName:         "doesNotExist",
+			expectNS:        "my-run",
+			expectSelector:  "app%3DmyApp",
+			expectServices:  services,
+			deploymentInput: defaultDeploymentInput,
+			shouldFail:      true,
+		},
+		{
+			testName:        "Wrong Space",
+			spaceName:       "otherSpace",
+			appName:         "myApp",
+			envName:         "run",
+			expectNS:        "my-run",
+			expectSelector:  "app%3DmyApp",
+			expectServices:  services,
+			deploymentInput: defaultDeploymentInput,
+			shouldFail:      true,
+		},
+	}
+
+	fixture := &testFixture{}
+	kc := getDefaultKubeClient(fixture, t)
+
+	for _, testCase := range testCases {
+		t.Run(testCase.testName, func(t *testing.T) {
+			fixture.deploymentInput = testCase.deploymentInput
+
+			err := kc.DeleteDeployment(testCase.spaceName, testCase.appName, testCase.envName)
+			if testCase.shouldFail {
+				require.Error(t, err, "Expected an error")
+			} else {
+				require.NoError(t, err, "Unexpected error occurred")
+
+				// Check routes deleted
+				routeHolder := fixture.os.delRouteHolder
+				require.NotNil(t, routeHolder, "Routes not deleted")
+				require.Equal(t, testCase.expectNS, routeHolder.namespace, "Routes deleted in wrong namespace")
+				require.Equal(t, testCase.expectSelector, routeHolder.labelSelector, "Incorrect label selector for routes")
+				require.Equal(t, expectOpts, routeHolder.opts, "Delete options for routes are incorrect")
+
+				// Check services deleted
+				expectedServices := createSet(testCase.expectServices...)
+				svcHolder := fixture.kube.svcDelHolder
+				for _, svc := range svcHolder {
+					_, pres := expectedServices[svc.name]
+					require.True(t, pres, "Found unexpected service %s", svc.name)
+					require.Equal(t, testCase.expectNS, svc.namespace, "Service deleted in wrong namespace")
+					require.Equal(t, expectOpts, svc.opts, "Delete options for services are incorrect")
+					delete(expectedServices, svc.name)
+				}
+				require.Empty(t, expectedServices, "Some expected services were not found: %v", expectedServices)
+
+				// Check deployment config deleted
+				dcHolder := fixture.os.delDCHolder
+				require.NotNil(t, dcHolder, "Deployment config not deleted")
+				require.Equal(t, testCase.appName, dcHolder.name, "Wrong deployment config deleted")
+				require.Equal(t, testCase.expectNS, dcHolder.namespace, "Deployment config deleted in wrong namespace")
+				require.Equal(t, expectOpts, dcHolder.opts, "Delete options for DC are incorrect")
+			}
+		})
+	}
+}
+
+func createSet(values ...string) map[string]struct{} {
+	result := make(map[string]struct{}, len(values))
+	var empty struct{}
+	for _, value := range values {
+		result[value] = empty
+	}
+	return result
 }
 
 func TestGetDeploymentStats(t *testing.T) {
