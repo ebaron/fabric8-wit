@@ -310,6 +310,11 @@ func (svc *testService) List(options metav1.ListOptions) (*v1.ServiceList, error
 	return &result, err
 }
 
+func (svc *testService) Delete(name string, options *metav1.DeleteOptions) error {
+	// TODO
+	return nil
+}
+
 // Metrics fakes
 
 type metricsHolder struct {
@@ -503,6 +508,11 @@ func (to *testOpenShift) GetDeploymentConfig(namespace string, name string) (map
 	return result, err
 }
 
+func (to *testOpenShift) DeleteDeploymentConfig(namespace string, name string, opts *metav1.DeleteOptions) error {
+	// TODO
+	return nil
+}
+
 func (to *testOpenShift) GetDeploymentConfigScale(namespace string, name string) (map[string]interface{}, error) {
 	input := to.fixture.scaleInput.getInput(name, namespace)
 	if input == nil {
@@ -536,6 +546,11 @@ func (to *testOpenShift) GetRoutes(namespace string) (map[string]interface{}, er
 	}
 	err := readJSON(input, &result)
 	return result, err
+}
+
+func (to *testOpenShift) DeleteRoutes(namespace string, labelSelector string, opts *metav1.DeleteOptions) error {
+	// TODO
+	return nil
 }
 
 func readJSON(filename string, dest interface{}) error {
