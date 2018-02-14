@@ -5,9 +5,14 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/goadesign/goa"
+	uuid "github.com/satori/go.uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/fabric8-services/fabric8-wit/app"
+	"github.com/fabric8-services/fabric8-wit/app/test"
+	"github.com/fabric8-services/fabric8-wit/configuration"
 	"github.com/fabric8-services/fabric8-wit/controller"
 	"github.com/fabric8-services/fabric8-wit/kubernetes"
 )
@@ -23,14 +28,14 @@ func (kc *testKubeClient) Close() {
 }
 
 type testKubeClientGetter struct {
-	client *testKubeClient
+	client             *testKubeClient
+	getKubeClientError error
 }
 
 func (g *testKubeClientGetter) GetKubeClient(ctx context.Context) (kubernetes.KubeClientInterface, error) {
 	// Overwrites previous clients created by this getter
 	g.client = &testKubeClient{}
-	// Also return an error to avoid executing remainder of calling method
-	return g.client, errors.New("Test")
+	return g.client, g.getKubeClientError
 }
 
 func TestAPIMethodsCloseKube(t *testing.T) {
@@ -44,6 +49,10 @@ func TestAPIMethodsCloseKube(t *testing.T) {
 				PodCount: &count,
 			}
 			return ctrl.SetDeployment(ctx)
+		}},
+		{"DeleteDeployment", func(ctrl *controller.DeploymentsController) error {
+			ctx := &app.DeleteDeploymentDeploymentsContext{}
+			return ctrl.DeleteDeployment(ctx)
 		}},
 		{"ShowDeploymentStatSeries", func(ctrl *controller.DeploymentsController) error {
 			ctx := &app.ShowDeploymentStatSeriesDeploymentsContext{}
@@ -79,7 +88,10 @@ func TestAPIMethodsCloseKube(t *testing.T) {
 		}},
 	}
 	// Check that each API method creating a KubeClientInterface also closes it
-	getter := &testKubeClientGetter{}
+	getter := &testKubeClientGetter{
+		// Also return an error to avoid executing remainder of calling method
+		getKubeClientError: errors.New("Test"),
+	}
 	controller := &controller.DeploymentsController{
 		KubeClientGetter: getter,
 	}
@@ -90,4 +102,14 @@ func TestAPIMethodsCloseKube(t *testing.T) {
 		assert.NotNil(t, getter.client, "No Kube client created: "+testCase.name)
 		assert.True(t, getter.client.closed, "Kube client not closed: "+testCase.name)
 	}
+}
+
+func TestDeleteDeployment(t *testing.T) {
+	svc := goa.New("deployment-service-test")
+	config, err := configuration.New("../config.yaml")
+	require.NoError(t, err)
+	controller := controller.NewDeploymentsController(svc, config)
+	controller.KubeClientGetter = &testKubeClientGetter{}
+	spUID := uuid.FromStringOrNil("ed3b4c4d-5a47-44ec-8b73-9a0fbc902184")
+	test.DeleteDeploymentDeploymentsOK(t, svc.Context, svc, controller, spUID, "myApp", "myEnv")
 }
