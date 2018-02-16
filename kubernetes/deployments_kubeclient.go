@@ -94,8 +94,8 @@ type OpenShiftRESTAPI interface {
 	DeleteDeploymentConfig(namespace string, name string, opts *metaV1.DeleteOptions) error
 	GetDeploymentConfigScale(namespace string, name string) (map[string]interface{}, error)
 	SetDeploymentConfigScale(namespace string, name string, scale map[string]interface{}) error
-	GetRoutes(namespace string) (map[string]interface{}, error)
-	DeleteRoutes(namespace string, labelSelector string, opts *metaV1.DeleteOptions) error
+	GetRoutes(namespace string, labelSelector string) (map[string]interface{}, error)
+	DeleteRoute(namespace string, name string, opts *metaV1.DeleteOptions) error
 }
 
 type openShiftAPIClient struct {
@@ -1185,21 +1185,15 @@ func (kc *kubeClient) getMatchingServices(namespace string, dc *deployment) (rou
 }
 
 func (kc *kubeClient) getRoutesByService(namespace string, routesByService map[string][]*route) error {
-	result, err := kc.GetRoutes(namespace)
+	result, err := kc.GetRoutes(namespace, "")
 	if err != nil {
 		return errs.WithStack(err)
 	}
 
-	// Parse list of routes
-	kind, ok := result["kind"].(string)
-	if !ok || kind != "RouteList" {
-		return errors.New("No route list returned from endpoint")
+	items, err := getRoutesFromRouteList(result)
+	if err != nil {
+		return err
 	}
-	items, ok := result["items"].([]interface{})
-	if !ok {
-		return errors.New("No list of routes in response")
-	}
-
 	for _, item := range items {
 		routeItem, ok := item.(map[string]interface{})
 		if !ok {
@@ -1331,9 +1325,27 @@ func (kc *kubeClient) getRoutesByService(namespace string, routesByService map[s
 	return nil
 }
 
-func (oc *openShiftAPIClient) GetRoutes(namespace string) (map[string]interface{}, error) {
-	routeURL := fmt.Sprintf("/oapi/v1/namespaces/%s/routes", namespace)
+func (oc *openShiftAPIClient) GetRoutes(namespace string, labelSelector string) (map[string]interface{}, error) {
+	var routeURL string
+	if len(labelSelector) > 0 {
+		routeURL = fmt.Sprintf("/oapi/v1/namespaces/%s/routes?labelSelector=%s", routeURL, labelSelector)
+	} else {
+		routeURL = fmt.Sprintf("/oapi/v1/namespaces/%s/routes", namespace)
+	}
 	return oc.getResource(routeURL, false)
+}
+
+func getRoutesFromRouteList(list map[string]interface{}) ([]interface{}, error) {
+	// Parse list of routes
+	kind, ok := list["kind"].(string)
+	if !ok || kind != "RouteList" {
+		return nil, errs.New("No route list returned from endpoint")
+	}
+	items, ok := list["items"].([]interface{})
+	if !ok {
+		return nil, errs.New("No list of routes in response")
+	}
+	return items, nil
 }
 
 func getOptionalStringValue(respData map[string]interface{}, paramName string) (string, error) {
@@ -1444,15 +1456,43 @@ func (kc *kubeClient) deleteRoutes(appName string, envNS string) error {
 	opts := &metaV1.DeleteOptions{
 		PropagationPolicy: &policy,
 	}
-	err := kc.DeleteRoutes(envNS, escapedSelector, opts)
+
+	// The API server rejects deleting services by label, so get all
+	// services with the label, and delete one-by-one
+	routeList, err := kc.GetRoutes(envNS, escapedSelector)
 	if err != nil {
 		return err
+	}
+	routeItems, err := getRoutesFromRouteList(routeList)
+	if err != nil {
+		return err
+	}
+	for _, routeItem := range routeItems {
+		route, ok := routeItem.(map[string]interface{})
+		if !ok {
+			return errs.New("Route is not an object")
+		}
+		metadata, ok := route["metadata"].(map[string]interface{})
+		if !ok {
+			return errs.New("Route has no metadata")
+		}
+		name, ok := metadata["name"].(string)
+		if !ok {
+			return errs.New("Route name is missing")
+		}
+
+		// API states this should return a Status object, but it returns the route instead,
+		// just check for no HTTP error
+		err := kc.DeleteRoute(envNS, name, opts)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func (oc *openShiftAPIClient) DeleteRoutes(namespace string, labelSelector string, opts *metaV1.DeleteOptions) error {
-	routesURL := fmt.Sprintf("/oapi/v1/namespaces/%s/routes?labelSelector=%s", namespace, labelSelector)
+func (oc *openShiftAPIClient) DeleteRoute(namespace string, name string, opts *metaV1.DeleteOptions) error {
+	routesURL := fmt.Sprintf("/oapi/v1/namespaces/%s/routes/%s", namespace, name)
 	// API states this should return a Status object, but it returns the route instead,
 	// just check for no HTTP error
 	return oc.sendResource(routesURL, "DELETE", opts)
