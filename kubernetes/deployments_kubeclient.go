@@ -730,6 +730,7 @@ func (oc *openShiftAPIClient) sendResource(url string, method string, reqBody in
 	if err != nil {
 		return errs.WithStack(err)
 	}
+	defer resp.Body.Close()
 
 	status := resp.StatusCode
 	if httpStatusFailed(status) {
