@@ -452,8 +452,9 @@ func (tm *testMetrics) getManyMetrics(metrics []*app.TimedNumberTuple, pods []*v
 type testOpenShift struct {
 	fixture        *testFixture
 	scaleHolder    *testScale
+	routeHolder    *testGetResult
 	delDCHolder    *testDeleteByName
-	delRouteHolder *testDeleteByLabel
+	delRouteHolder []*testDeleteByName
 }
 
 type testScale struct {
@@ -462,16 +463,15 @@ type testScale struct {
 	dcName      string
 }
 
+type testGetResult struct {
+	namespace     string
+	labelSelector string
+}
+
 type testDeleteByName struct {
 	namespace string
 	name      string
 	opts      *metav1.DeleteOptions
-}
-
-type testDeleteByLabel struct {
-	namespace     string
-	labelSelector string
-	opts          *metav1.DeleteOptions
 }
 
 func (fixture *testFixture) GetOpenShiftRESTAPI(config *kubernetes.KubeClientConfig) (kubernetes.OpenShiftRESTAPI, error) {
@@ -563,23 +563,28 @@ var defaultRouteInput = map[string]string{
 	"my-run": "routes-two.json",
 }
 
-func (to *testOpenShift) GetRoutes(namespace string) (map[string]interface{}, error) {
+func (to *testOpenShift) GetRoutes(namespace string, labelSelector string) (map[string]interface{}, error) {
 	var result map[string]interface{}
 	input := to.fixture.routeInput[namespace]
 	if len(input) == 0 {
 		// No matching routes
 		return result, nil
 	}
+	to.routeHolder = &testGetResult{
+		namespace:     namespace,
+		labelSelector: labelSelector,
+	}
 	err := readJSON(input, &result)
 	return result, err
 }
 
-func (to *testOpenShift) DeleteRoutes(namespace string, labelSelector string, opts *metav1.DeleteOptions) error {
-	to.delRouteHolder = &testDeleteByLabel{
-		namespace:     namespace,
-		labelSelector: labelSelector,
-		opts:          opts,
+func (to *testOpenShift) DeleteRoute(namespace string, name string, opts *metav1.DeleteOptions) error {
+	delHolder := &testDeleteByName{
+		namespace: namespace,
+		name:      name,
+		opts:      opts,
 	}
+	to.delRouteHolder = append(to.delRouteHolder, delHolder)
 	return nil
 }
 
@@ -1295,7 +1300,8 @@ func TestDeleteDeployment(t *testing.T) {
 	expectOpts := &metav1.DeleteOptions{
 		PropagationPolicy: &policy,
 	}
-	services := []string{"myApp", "myOtherApp"} // Test impl doesn't check labels
+	expectServices := []string{"myApp", "myOtherApp"} // Test impl doesn't check labels
+	expectRoutes := expectServices                    // Our routes use the same names as their services
 	testCases := []struct {
 		testName       string
 		spaceName      string
@@ -1304,6 +1310,7 @@ func TestDeleteDeployment(t *testing.T) {
 		expectNS       string
 		expectSelector string
 		expectServices []string
+		expectRoutes   []string
 		shouldFail     bool
 		deploymentInput
 	}{
@@ -1314,7 +1321,8 @@ func TestDeleteDeployment(t *testing.T) {
 			envName:         "run",
 			expectNS:        "my-run",
 			expectSelector:  "app%3DmyApp",
-			expectServices:  services,
+			expectServices:  expectServices,
+			expectRoutes:    expectRoutes,
 			deploymentInput: defaultDeploymentInput,
 		},
 		{
@@ -1324,7 +1332,8 @@ func TestDeleteDeployment(t *testing.T) {
 			envName:         "doesNotExist",
 			expectNS:        "my-run",
 			expectSelector:  "app%3DmyApp",
-			expectServices:  services,
+			expectServices:  expectServices,
+			expectRoutes:    expectRoutes,
 			deploymentInput: defaultDeploymentInput,
 			shouldFail:      true,
 		},
@@ -1335,7 +1344,8 @@ func TestDeleteDeployment(t *testing.T) {
 			envName:         "run",
 			expectNS:        "my-run",
 			expectSelector:  "app%3DmyApp",
-			expectServices:  services,
+			expectServices:  expectServices,
+			expectRoutes:    expectRoutes,
 			deploymentInput: defaultDeploymentInput,
 			shouldFail:      true,
 		},
@@ -1354,17 +1364,25 @@ func TestDeleteDeployment(t *testing.T) {
 			} else {
 				require.NoError(t, err, "Unexpected error occurred")
 
-				// Check routes deleted
-				routeHolder := fixture.os.delRouteHolder
-				require.NotNil(t, routeHolder, "Routes not deleted")
-				require.Equal(t, testCase.expectNS, routeHolder.namespace, "Routes deleted in wrong namespace")
+				// Check route list
+				require.NotNil(t, fixture.os.routeHolder, "Route list was never retrieved")
+				routeHolder := fixture.os.routeHolder
 				require.Equal(t, testCase.expectSelector, routeHolder.labelSelector, "Incorrect label selector for routes")
-				require.Equal(t, expectOpts, routeHolder.opts, "Delete options for routes are incorrect")
+				require.Equal(t, testCase.expectNS, routeHolder.namespace, "Routes retrieved from wrong namespace")
+
+				// Check routes deleted
+				expectedRoutes := createSet(testCase.expectRoutes...)
+				for _, route := range fixture.os.delRouteHolder {
+					_, pres := expectedRoutes[route.name]
+					require.True(t, pres, "Found unexpected route %s", route.name)
+					require.Equal(t, testCase.expectNS, route.namespace, "Routes deleted in wrong namespace")
+					require.Equal(t, expectOpts, route.opts, "Delete options for routes are incorrect")
+					delete(expectedRoutes, route.name)
+				}
 
 				// Check services deleted
 				expectedServices := createSet(testCase.expectServices...)
-				svcHolder := fixture.kube.svcDelHolder
-				for _, svc := range svcHolder {
+				for _, svc := range fixture.kube.svcDelHolder {
 					_, pres := expectedServices[svc.name]
 					require.True(t, pres, "Found unexpected service %s", svc.name)
 					require.Equal(t, testCase.expectNS, svc.namespace, "Service deleted in wrong namespace")
