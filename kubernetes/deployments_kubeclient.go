@@ -1164,16 +1164,10 @@ func (kc *kubeClient) getRoutesByService(namespace string, routesByService map[s
 		return err
 	}
 
-	// Parse list of routes
-	kind, ok := result["kind"].(string)
-	if !ok || kind != "RouteList" {
-		return errors.New("No route list returned from endpoint")
+	items, err := getRoutesFromRouteList(result)
+	if err != nil {
+		return err
 	}
-	items, ok := result["items"].([]interface{})
-	if !ok {
-		return errors.New("No list of routes in response")
-	}
-
 	for _, item := range items {
 		routeItem, ok := item.(map[interface{}]interface{})
 		if !ok {
@@ -1305,6 +1299,19 @@ func (kc *kubeClient) getRoutesByService(namespace string, routesByService map[s
 	return nil
 }
 
+func getRoutesFromRouteList(list map[interface{}]interface{}) ([]interface{}, error) {
+	// Parse list of routes
+	kind, ok := list["kind"].(string)
+	if !ok || kind != "RouteList" {
+		return nil, errs.New("No route list returned from endpoint")
+	}
+	items, ok := list["items"].([]interface{})
+	if !ok {
+		return nil, errs.New("No list of routes in response")
+	}
+	return items, nil
+}
+
 func getOptionalStringValue(respData map[interface{}]interface{}, paramName string) (string, error) {
 	val, pres := respData[paramName]
 	if !pres {
@@ -1417,13 +1424,39 @@ func (kc *kubeClient) deleteRoutes(appName string, envNS string) error {
 	if err != nil {
 		return errs.WithStack(err)
 	}
-	// API states this should return a Status object, but it returns the route instead,
-	// just check for no HTTP error
-	resp, err := kc.sendResource(routesURL, "DELETE", reqBody, "application/json")
+
+	// The API server rejects deleting services by label, so get all
+	// services with the label, and delete one-by-one
+	routeList, err := kc.getResource(routesURL, false)
 	if err != nil {
 		return err
 	}
-	fmt.Println(string(resp))
+	routeItems, err := getRoutesFromRouteList(routeList)
+	if err != nil {
+		return err
+	}
+	for _, routeItem := range routeItems {
+		route, ok := routeItem.(map[interface{}]interface{})
+		if !ok {
+			return errs.New("Route is not an object")
+		}
+		metadata, ok := route["metadata"].(map[interface{}]interface{})
+		if !ok {
+			return errs.New("Route has no metadata")
+		}
+		name, ok := metadata["name"].(string)
+		if !ok {
+			return errs.New("Route name is missing")
+		}
+
+		// API states this should return a Status object, but it returns the route instead,
+		// just check for no HTTP error
+		deleteURL := fmt.Sprintf("/oapi/v1/namespaces/%s/routes/%s", envNS, name)
+		_, err := kc.sendResource(deleteURL, "DELETE", reqBody, "application/json")
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
