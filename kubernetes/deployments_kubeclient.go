@@ -792,10 +792,12 @@ func (oc *openShiftAPIClient) GetDeploymentConfig(namespace string, name string)
 }
 
 func (kc *kubeClient) deleteDeploymentConfig(spaceName string, appName string, namespace string) error {
-	// Check that the deployment config belongs to the expected space
-	_, err := kc.getDeploymentConfig(namespace, appName, spaceName)
+	// Check that the deployment config exists and belongs to the expected space
+	dc, err := kc.getDeploymentConfig(namespace, appName, spaceName)
 	if err != nil {
 		return err
+	} else if dc == nil {
+		return errs.Errorf("deployment config %s does not exist in %s", appName, namespace)
 	}
 
 	// Delete all dependent objects and then this DC
