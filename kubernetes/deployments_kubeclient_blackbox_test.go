@@ -1349,15 +1349,70 @@ func TestDeleteDeployment(t *testing.T) {
 			deploymentInput: defaultDeploymentInput,
 			shouldFail:      true,
 		},
+		{
+			testName:       "No Routes",
+			spaceName:      "mySpace",
+			appName:        "myApp",
+			envName:        "run",
+			expectNS:       "my-run",
+			expectSelector: "app%3DmyApp",
+			expectServices: expectServices,
+			expectRoutes:   []string{},
+			deploymentInput: deploymentInput{
+				dcInput:  defaultDeploymentConfigInput,
+				rcInput:  defaultReplicationControllerInput,
+				podInput: defaultPodInput,
+				svcInput: defaultServiceInput,
+				routeInput: map[string]string{
+					"my-run": "routes-zero.json",
+				},
+			},
+		},
+		{
+			testName:       "No Services",
+			spaceName:      "mySpace",
+			appName:        "myApp",
+			envName:        "run",
+			expectNS:       "my-run",
+			expectSelector: "app%3DmyApp",
+			expectServices: []string{},
+			expectRoutes:   expectRoutes,
+			deploymentInput: deploymentInput{
+				dcInput:  defaultDeploymentConfigInput,
+				rcInput:  defaultReplicationControllerInput,
+				podInput: defaultPodInput,
+				svcInput: map[string]string{
+					"my-run": "services-zero.json",
+				},
+				routeInput: defaultRouteInput,
+			},
+		},
+		{
+			testName:       "No DeploymentConfig",
+			spaceName:      "mySpace",
+			appName:        "myApp",
+			envName:        "run",
+			expectNS:       "my-run",
+			expectSelector: "app%3DmyApp",
+			expectServices: expectServices,
+			expectRoutes:   expectRoutes,
+			deploymentInput: deploymentInput{
+				dcInput:    deploymentConfigInput{}, // Empty
+				rcInput:    defaultReplicationControllerInput,
+				podInput:   defaultPodInput,
+				svcInput:   defaultServiceInput,
+				routeInput: defaultRouteInput,
+			},
+			shouldFail: true,
+		},
 	}
-
-	fixture := &testFixture{}
-	kc := getDefaultKubeClient(fixture, t)
 
 	for _, testCase := range testCases {
 		t.Run(testCase.testName, func(t *testing.T) {
+			fixture := &testFixture{}
 			fixture.deploymentInput = testCase.deploymentInput
 
+			kc := getDefaultKubeClient(fixture, t)
 			err := kc.DeleteDeployment(testCase.spaceName, testCase.appName, testCase.envName)
 			if testCase.shouldFail {
 				require.Error(t, err, "Expected an error")
@@ -1379,6 +1434,7 @@ func TestDeleteDeployment(t *testing.T) {
 					require.Equal(t, expectOpts, route.opts, "Delete options for routes are incorrect")
 					delete(expectedRoutes, route.name)
 				}
+				require.Empty(t, expectedRoutes, "Some expected routes were not found: %v", expectedRoutes)
 
 				// Check services deleted
 				expectedServices := createSet(testCase.expectServices...)
